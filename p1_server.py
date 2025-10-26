@@ -81,7 +81,7 @@ def process_ack(ack_packet):
 
     with state_lock:
         stats["acks_received"] += 1
-        current_time_ms = int(time.time() * 1000)
+        current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
         
         # --- 1. Process SACKs (Karn's Rule applied here) ---
         if sack_start < sack_end and sack_start in in_flight_packets:
@@ -91,7 +91,7 @@ def process_ack(ack_packet):
             
             # Karn's Rule: Only update RTT for non-retransmitted packets
             if retrans_count == 0:
-                sample_rtt_ms = current_time_ms - ts_echo
+                sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
                 rtt_estimator.update(sample_rtt_ms / 1000.0)
 
         # --- 2. Process Cumulative ACK (Karn's Rule applied here) ---
@@ -110,7 +110,7 @@ def process_ack(ack_packet):
                 # This is a simplification; a more complex impl would match ts_echo.
                 # For simplicity, we'll only use the *last* non-retransmitted ACK.
                 if retrans_count == 0 and seq == max(acked_keys):
-                     sample_rtt_ms = current_time_ms - ts_echo
+                     sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
                      rtt_estimator.update(sample_rtt_ms / 1000.0)
                      
         elif cum_ack == base_seq:
@@ -211,7 +211,7 @@ def run_server(server_ip, server_port, sws):
             while len(in_flight_packets) < SWS and next_seq < file_size:
                 data_chunk_size = min(DATA_LEN, file_size - next_seq)
                 data_chunk = file_data[next_seq : next_seq + data_chunk_size]
-                timestamp_ms = int(time.time() * 1000)
+                timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
                 
                 packet = make_packet(next_seq, data_chunk, timestamp_ms)
                 sock.sendto(packet, client_addr)
