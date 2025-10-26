@@ -1,315 +1,261 @@
-#!/usr/bin/env python3
-"""
-Optimized Reliable UDP Server with SACK, Fast Retransmit, and Adaptive RTO
-Implements TCP-like sliding window protocol for efficient file transfer
-"""
-
 import socket
-import struct
-import time
 import sys
-from collections import defaultdict
-import logging
+import time
+import struct
+import threading
+import random
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- Constants ---
+MAX_PAYLOAD_SIZE = 1200
+# Header: Seq (I=4B) + Timestamp (I=4B) + SACK_Start (I=4B) + SACK_End (I=4B) + Padding (4s=4B)
+HEADER_LEN = 20
+PACKET_FORMAT = '!IIII4s' # 4+4+4+4+4 = 20 bytes
+DATA_LEN = MAX_PAYLOAD_SIZE - HEADER_LEN # 1180 bytes
+EOF_MSG = b'EOF'
 
+# --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    """
-    Jacobson/Karels RTO estimation algorithm
-    Reference: "Congestion Avoidance and Control" (Jacobson & Karels, 1988)
-    """
-    def __init__(self):
-        self.srtt = None      # Smoothed Round Trip Time
-        self.rttvar = None    # RTT variance
-        self.rto = 1.0        # Retransmission Timeout
-        self.alpha = 0.125    # SRTT gain (1/8)
-        self.beta = 0.25      # RTTVAR gain (1/4)
-        self.K = 4            # Variance multiplier
-        self.G = 0.001        # Clock granularity (1ms)
-        
-    def update_rtt(self, measured_rtt):
-        """Update RTO based on new RTT measurement (Karn's algorithm)"""
-        if self.srtt is None:  # First measurement
-            self.srtt = measured_rtt
-            self.rttvar = measured_rtt / 2
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.5, max_rto=60.0):
+        self.alpha = alpha
+        self.beta = beta
+        self.srtt = 0.0
+        self.rttvar = 0.0
+        self.rto = initial_rto
+        self.min_rto = min_rto
+        self.max_rto = max_rto
+
+    def update(self, sample_rtt):
+        """Update RTO based on a new RTT sample (in seconds)"""
+        if self.srtt == 0.0:
+            # First sample
+            self.srtt = sample_rtt
+            self.rttvar = sample_rtt / 2.0
         else:
-            # Jacobson/Karels algorithm
-            err = measured_rtt - self.srtt
-            self.srtt = self.srtt + self.alpha * err
-            self.rttvar = self.rttvar + self.beta * (abs(err) - self.rttvar)
+            # Subsequent samples
+            delta = abs(self.srtt - sample_rtt)
+            self.rttvar = (1 - self.beta) * self.rttvar + self.beta * delta
+            self.srtt = (1 - self.alpha) * self.srtt + self.alpha * sample_rtt
         
-        # Calculate RTO with variance component
-        self.rto = self.srtt + max(self.G, self.K * self.rttvar)
-        
-        # Clamp RTO between 200ms and 60s
-        self.rto = max(0.2, min(60.0, self.rto))
-        logger.debug(f"RTO updated: {self.rto:.3f}s (SRTT: {self.srtt:.3f}s, RTTVAR: {self.rttvar:.3f}s)")
-        
-    def on_timeout(self):
-        """Exponential backoff on timeout"""
-        old_rto = self.rto
-        self.rto = min(self.rto * 2, 60.0)
-        logger.debug(f"Timeout detected: RTO backed off {old_rto:.3f}s -> {self.rto:.3f}s")
+        self.rto = max(self.min_rto, min(self.srtt + 4 * self.rttvar, self.max_rto))
 
+    def get_rto(self):
+        return self.rto
 
-class SenderWindow:
-    """
-    Byte-oriented sliding window with SACK support
-    Implements selective acknowledgment for efficient retransmission
-    """
-    def __init__(self, sws_packets):
-        self.sws = sws_packets * 1180  # Convert packets to bytes
-        self.send_base = 0              # Oldest unacknowledged byte
-        self.next_seq = 0               # Next byte to send
-        self.packets_in_flight = {}     # {seq_num: (data, send_time, retx_count)}
-        self.rto_estimator = RTOEstimator()
-        self.stats = {
-            'packets_sent': 0,
-            'packets_retransmitted': 0,
-            'bytes_sent': 0,
-            'acks_received': 0,
-            'sacks_used': 0
-        }
+# --- Global Server State ---
+rtt_estimator = RTOEstimator()
+in_flight_packets = {}  # {seq: (packet, send_time_sec, retransmit_count)}
+dup_ack_counts = {}   # {seq: count}
+base_seq = 0            # Cumulative ACK (lowest byte in window)
+next_seq = 0            # Next byte to be sent
+file_data = b''
+file_size = 0
+SWS = 0                 # Sender Window Size (in packets)
+client_addr = None
+transfer_complete = False
+state_lock = threading.Lock()
+
+# --- Statistics ---
+stats = {
+    "packets_sent": 0,
+    "packets_retransmitted": 0,
+    "acks_received": 0,
+    "sacks_processed": 0,
+    "fast_retransmits": 0
+}
+
+def make_packet(seq, data, timestamp_ms):
+    """Creates a data packet with the 20-byte header."""
+    # SACK fields (sack_start, sack_end) are 0 for data packets
+    header = struct.pack(PACKET_FORMAT, seq, timestamp_ms, 0, 0, b'\x00'*4)
+    return header + data
+
+def process_ack(ack_packet):
+    """Processes an incoming ACK packet."""
+    global base_seq
+    try:
+        # Unpack ACK: Cum_ACK (I), TS_Echo (I), SACK_Start (I), SACK_End (I)
+        cum_ack, ts_echo, sack_start, sack_end, _ = struct.unpack(PACKET_FORMAT, ack_packet)
+    except struct.error:
+        print("Received malformed ACK.")
+        return
+
+    with state_lock:
+        stats["acks_received"] += 1
+        current_time_ms = int(time.time() * 1000)
         
-    def can_send(self):
-        """Check if we can send more data (sliding window check)"""
-        return (self.next_seq - self.send_base) < self.sws
-    
-    def send_packet(self, data, sock, addr):
-        """Send a new data packet"""
-        if not self.can_send():
-            return False
-        
-        seq = self.next_seq
-        timestamp_ms = int((time.time() * 1000)) % (2**32)
-        
-        # Build packet header (20 bytes)
-        header = struct.pack('!II', seq, timestamp_ms)
-        header += b'\x00' * 12  # Reserved/SACK blocks (empty for data packets)
-        packet = header + data
-        
-        if len(packet) > 1200:
-            logger.error(f"Packet too large: {len(packet)} > 1200")
-            return False
-        
-        sock.sendto(packet, addr)
-        self.packets_in_flight[seq] = (data, time.time(), 0)
-        self.next_seq += len(data)
-        self.stats['packets_sent'] += 1
-        self.stats['bytes_sent'] += len(data)
-        
-        return True
-    
-    def process_ack(self, ack_seq, sack_blocks, recv_timestamp):
-        """Process cumulative ACK and SACK blocks"""
-        # Update RTT measurement (only for non-retransmitted packets - Karn's algorithm)
-        if self.send_base in self.packets_in_flight:
-            _, send_time, retx_count = self.packets_in_flight[self.send_base]
-            if retx_count == 0:  # Only measure RTT from original transmissions
-                rtt = time.time() - send_time
-                if 0.001 <= rtt <= 60:  # Sanity check
-                    self.rto_estimator.update_rtt(rtt)
-        
-        # Process cumulative ACK - remove all acknowledged packets
-        if ack_seq > self.send_base:
-            packets_acked = []
-            for seq in list(self.packets_in_flight.keys()):
-                if seq < ack_seq:
-                    packets_acked.append(seq)
-                    del self.packets_in_flight[seq]
-            self.send_base = ack_seq
-            self.stats['acks_received'] += 1
-            logger.debug(f"Cumulative ACK: {ack_seq}, removed {len(packets_acked)} packets")
-        
-        # Process SACK blocks - mark additional packets as received
-        if sack_blocks:
-            self.stats['sacks_used'] += 1
-            sack_removed = 0
-            for left_edge, right_edge in sack_blocks:
-                if left_edge >= self.send_base and right_edge <= self.next_seq:
-                    for seq in list(self.packets_in_flight.keys()):
-                        if left_edge <= seq < right_edge:
-                            del self.packets_in_flight[seq]
-                            sack_removed += 1
-            logger.debug(f"SACK processed: removed {sack_removed} packets from blocks {sack_blocks}")
-    
-    def check_timeouts_and_retransmit(self, sock, addr):
-        """Check for timeouts and retransmit intelligently"""
-        current_time = time.time()
-        rto = self.rto_estimator.rto
-        
-        # Find packets that need retransmission
-        to_retransmit = []
-        for seq, (data, send_time, retx_count) in self.packets_in_flight.items():
-            if current_time - send_time > rto:
-                to_retransmit.append((seq, data, retx_count))
-        
-        # Retransmit timed-out packets
-        for seq, data, retx_count in sorted(to_retransmit):
-            timestamp_ms = int((time.time() * 1000)) % (2**32)
-            header = struct.pack('!II', seq, timestamp_ms)
-            header += b'\x00' * 12
-            packet = header + data
+        # --- 1. Process SACKs (Karn's Rule applied here) ---
+        if sack_start < sack_end and sack_start in in_flight_packets:
+            stats["sacks_processed"] += 1
+            # Remove SACKed packet from in-flight window
+            _packet, _send_time, retrans_count = in_flight_packets.pop(sack_start)
             
-            sock.sendto(packet, addr)
-            self.packets_in_flight[seq] = (data, time.time(), retx_count + 1)
-            self.stats['packets_retransmitted'] += 1
-            logger.debug(f"Timeout retransmission: seq={seq}, retx_count={retx_count + 1}")
-            
-        if to_retransmit:
-            self.rto_estimator.on_timeout()
+            # Karn's Rule: Only update RTT for non-retransmitted packets
+            if retrans_count == 0:
+                sample_rtt_ms = current_time_ms - ts_echo
+                rtt_estimator.update(sample_rtt_ms / 1000.0)
 
-
-class FastRetransmit:
-    """
-    Fast retransmit mechanism - retransmit on 3 duplicate ACKs
-    Reference: "TCP Fast Retransmit" (RFC 5827)
-    """
-    def __init__(self):
-        self.last_ack = 0
-        self.dup_ack_count = 0
-        self.DUP_ACK_THRESHOLD = 3  # Standard TCP threshold
-        self.stats = {'fast_retransmits': 0}
-        
-    def process_ack(self, ack_seq, sender_window, sock, addr):
-        """Detect duplicate ACKs and trigger fast retransmit"""
-        if ack_seq == self.last_ack and ack_seq < sender_window.next_seq:
-            self.dup_ack_count += 1
-            logger.debug(f"Duplicate ACK received: {ack_seq}, count={self.dup_ack_count}")
+        # --- 2. Process Cumulative ACK (Karn's Rule applied here) ---
+        if cum_ack > base_seq:
+            # New data has been cumulatively acknowledged
+            base_seq = cum_ack
+            dup_ack_counts.clear() # Reset duplicate ACK counter
             
-            # Fast retransmit after 3 duplicate ACKs
-            if self.dup_ack_count == self.DUP_ACK_THRESHOLD:
-                if ack_seq in sender_window.packets_in_flight:
-                    data, send_time, retx_count = sender_window.packets_in_flight[ack_seq]
-                    timestamp_ms = int((time.time() * 1000)) % (2**32)
-                    header = struct.pack('!II', ack_seq, timestamp_ms)
-                    header += b'\x00' * 12
-                    packet = header + data
+            # Remove all acknowledged packets from in-flight window
+            acked_keys = [seq for seq in in_flight_packets if seq < cum_ack]
+            for seq in acked_keys:
+                _packet, _send_time, retrans_count = in_flight_packets.pop(seq)
+                
+                # Karn's Rule: Only update RTT for the packet that triggered this ACK
+                # We assume the ts_echo corresponds to the packet that triggered this cum_ack
+                # This is a simplification; a more complex impl would match ts_echo.
+                # For simplicity, we'll only use the *last* non-retransmitted ACK.
+                if retrans_count == 0 and seq == max(acked_keys):
+                     sample_rtt_ms = current_time_ms - ts_echo
+                     rtt_estimator.update(sample_rtt_ms / 1000.0)
+                     
+        elif cum_ack == base_seq:
+            # --- 3. Process Duplicate ACK ---
+            dup_ack_counts[cum_ack] = dup_ack_counts.get(cum_ack, 0) + 1
+            
+            # Fast Retransmit Trigger
+            if dup_ack_counts[cum_ack] == 3:
+                if base_seq in in_flight_packets:
+                    print(f"--- FAST RETRANSMIT for seq {base_seq} ---")
+                    stats["fast_retransmits"] += 1
+                    stats["packets_retransmitted"] += 1
                     
-                    sock.sendto(packet, addr)
-                    sender_window.packets_in_flight[ack_seq] = (data, time.time(), retx_count + 1)
-                    self.stats['fast_retransmits'] += 1
-                    logger.info(f"Fast retransmit triggered for seq={ack_seq}")
-        else:
-            self.last_ack = ack_seq
-            self.dup_ack_count = 0
+                    packet, _st, retrans_count = in_flight_packets[base_seq]
+                    sock.sendto(packet, client_addr)
+                    # Update send time and retransmit count
+                    in_flight_packets[base_seq] = (packet, time.time(), retrans_count + 1)
+                    dup_ack_counts[cum_ack] = 0 # Reset after retransmit
 
+def ack_receiver_thread(sock):
+    """Thread to continuously listen for ACK packets."""
+    while not transfer_complete:
+        try:
+            # Set a timeout so the thread can check transfer_complete flag
+            sock.settimeout(1.0)
+            ack_packet, _ = sock.recvfrom(MAX_PAYLOAD_SIZE)
+            if ack_packet:
+                process_ack(ack_packet)
+        except socket.timeout:
+            continue
+        except Exception as e:
+            if not transfer_complete:
+                print(f"ACK receiver error: {e}")
+            break
+    print("ACK receiver thread stopping.")
 
-def server(server_ip, server_port, sws_packets):
-    """
-    Reliable UDP server with sliding window and SACK support
-    """
+def run_server(server_ip, server_port, sws):
+    """Main server logic."""
+    global SWS, file_data, file_size, next_seq, base_seq, client_addr, transfer_complete, sock
+    SWS = sws
+    
+    # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((server_ip, server_port))
-    sock.settimeout(0.01)  # 10ms timeout for responsive ACK processing
-    
-    logger.info(f"Server listening on {server_ip}:{server_port}, SWS={sws_packets} packets")
-    
-    # Wait for client request
-    try:
-        data, client_addr = sock.recvfrom(1)
-        logger.info(f"Client connected from {client_addr}")
-    except socket.timeout:
-        logger.error("Timeout waiting for client request")
-        sock.close()
-        return
-    
-    # Read file to transfer
+    print(f"Server listening on {server_ip}:{server_port} with SWS={SWS}")
+
+    # --- 1. Wait for Connection Request ---
+    while True:
+        try:
+            # Wait for the 1-byte request
+            request, client_addr = sock.recvfrom(1)
+            if request == b'\x01':
+                print(f"Connection request from {client_addr}. Starting transfer.")
+                break
+        except Exception as e:
+            print(f"Error waiting for client: {e}")
+            return
+
+    # --- 2. Read File ---
     try:
         with open('data.txt', 'rb') as f:
             file_data = f.read()
-        logger.info(f"File loaded: {len(file_data)} bytes")
+        file_size = len(file_data)
+        print(f"File data.txt read ({file_size} bytes).")
     except FileNotFoundError:
-        logger.error("data.txt not found")
+        print("Error: data.txt not found.")
         sock.close()
         return
-    
-    # Initialize protocols
-    sender_window = SenderWindow(sws_packets)
-    fast_retx = FastRetransmit()
+
+    # --- 3. Start ACK Receiver Thread ---
+    receiver_thread = threading.Thread(target=ack_receiver_thread, args=(sock,))
+    receiver_thread.start()
+
+    # --- 4. Main Sender Loop ---
     start_time = time.time()
-    
-    # Transmission loop
-    offset = 0
-    last_ack_time = time.time()
-    ack_timeout_ms = 50  # Max time to wait for ACKs before checking timeouts
-    
-    logger.info("Starting file transfer...")
-    
-    while sender_window.send_base < len(file_data) or sender_window.packets_in_flight:
-        # Send new packets while window allows
-        while sender_window.can_send() and offset < len(file_data):
-            chunk_size = min(1180, len(file_data) - offset)
-            chunk = file_data[offset:offset + chunk_size]
-            sender_window.send_packet(chunk, sock, client_addr)
-            offset += chunk_size
-        
-        # Receive ACKs with timeout
-        current_time = time.time()
-        try:
-            ack_data, _ = sock.recvfrom(1200)
-            if len(ack_data) >= 4:
-                ack_seq = struct.unpack('!I', ack_data[:4])[0]
+    while base_seq < file_size:
+        with state_lock:
+            # --- 4a. Check for Timeouts (RTO) ---
+            current_time = time.time()
+            packets_to_retransmit = []
+            
+            for seq, (packet, send_time, retrans_count) in in_flight_packets.items():
+                # Apply exponential backoff, capped at max_rto
+                current_packet_rto = min(rtt_estimator.get_rto() * (2 ** retrans_count), rtt_estimator.max_rto)
                 
-                # Parse SACK blocks
-                sack_blocks = []
-                if len(ack_data) >= 20:
-                    for i in range(3):
-                        offset_bytes = 8 + i * 8
-                        if len(ack_data) >= offset_bytes + 8:
-                            left, right = struct.unpack('!II', ack_data[offset_bytes:offset_bytes + 8])
-                            if left > 0 and right > left and left >= sender_window.send_base:
-                                sack_blocks.append((left, right))
+                if current_time - send_time > current_packet_rto:
+                    packets_to_retransmit.append(seq)
+            
+            for seq in packets_to_retransmit:
+                if seq in in_flight_packets: # Check if not SACKed in the meantime
+                    print(f"--- TIMEOUT for seq {seq} (RTO: {current_packet_rto:.2f}s) ---")
+                    stats["packets_retransmitted"] += 1
+                    packet, _st, retrans_count = in_flight_packets[seq]
+                    sock.sendto(packet, client_addr)
+                    in_flight_packets[seq] = (packet, time.time(), retrans_count + 1)
+
+            # --- 4b. Send New Packets ---
+            while len(in_flight_packets) < SWS and next_seq < file_size:
+                data_chunk_size = min(DATA_LEN, file_size - next_seq)
+                data_chunk = file_data[next_seq : next_seq + data_chunk_size]
+                timestamp_ms = int(time.time() * 1000)
                 
-                sender_window.process_ack(ack_seq, sack_blocks, current_time)
-                fast_retx.process_ack(ack_seq, sender_window, sock, client_addr)
-                last_ack_time = current_time
-        except socket.timeout:
-            pass
+                packet = make_packet(next_seq, data_chunk, timestamp_ms)
+                sock.sendto(packet, client_addr)
+                
+                in_flight_packets[next_seq] = (packet, time.time(), 0)
+                stats["packets_sent"] += 1
+                next_seq += data_chunk_size
         
-        # Check for timeouts periodically
-        if (current_time - last_ack_time) * 1000 > ack_timeout_ms:
-            sender_window.check_timeouts_and_retransmit(sock, client_addr)
-            last_ack_time = current_time
-    
-    # Send EOF marker multiple times for reliability
-    eof_seq = len(file_data)
-    eof_packet = struct.pack('!II', eof_seq, 0) + b'\x00' * 12 + b'EOF'
-    
-    logger.info("Sending EOF marker...")
-    for i in range(5):
+        # Sleep briefly to prevent busy-looping
+        time.sleep(0.001) 
+
+    # --- 5. Send EOF ---
+    print("All file data acknowledged. Sending EOF.")
+    eof_packet = make_packet(file_size, EOF_MSG, int(time.time() * 1000))
+    for _ in range(5): # Send EOF 5 times for reliability
         sock.sendto(eof_packet, client_addr)
-        time.sleep(0.05)
-    
-    elapsed_time = time.time() - start_time
-    
-    # Log statistics
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Transfer Complete!")
-    logger.info(f"{'='*60}")
-    logger.info(f"File size: {len(file_data)} bytes")
-    logger.info(f"Transfer time: {elapsed_time:.2f}s")
-    logger.info(f"Throughput: {len(file_data) / elapsed_time / 1000:.2f} Kbps")
-    logger.info(f"Packets sent: {sender_window.stats['packets_sent']}")
-    logger.info(f"Packets retransmitted: {sender_window.stats['packets_retransmitted']}")
-    logger.info(f"Retransmission rate: {sender_window.stats['packets_retransmitted'] / sender_window.stats['packets_sent'] * 100:.1f}%")
-    logger.info(f"ACKs received: {sender_window.stats['acks_received']}")
-    logger.info(f"SACK blocks used: {sender_window.stats['sacks_used']}")
-    logger.info(f"Fast retransmits: {fast_retx.stats['fast_retransmits']}")
-    logger.info(f"Final RTO: {sender_window.rto_estimator.rto:.3f}s")
-    logger.info(f"{'='*60}\n")
-    
+        time.sleep(0.01)
+
+    # --- 6. Cleanup ---
+    transfer_complete = True
+    receiver_thread.join()
     sock.close()
+    
+    end_time = time.time()
+    print("\n--- Transfer Complete ---")
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+    print("Statistics:")
+    print(f"  Packets Sent: {stats['packets_sent']}")
+    print(f"  Packets Retransmitted: {stats['packets_retransmitted']}")
+    print(f"  ACKs Received: {stats['acks_received']}")
+    print(f"  SACKs Processed: {stats['sacks_processed']}")
+    print(f"  Fast Retransmits: {stats['fast_retransmits']}")
+    print(f"  Final RTO: {rtt_estimator.get_rto():.3f}s")
+    print(f"  Final SRTT: {rtt_estimator.srtt:.3f}s")
+    print("-------------------------\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print(f"Usage: python3 {sys.argv[0]} <SERVER_IP> <SERVER_PORT> <SWS>")
+        print("Usage: python3 p1_server.py <SERVER_IP> <SERVER_PORT> <SWS>")
         sys.exit(1)
     
-    server_ip = sys.argv[1]
-    server_port = int(sys.argv[2])
-    sws = int(sys.argv[3])
+    SERVER_IP = sys.argv[1]
+    SERVER_PORT = int(sys.argv[2])
+    SWS_ARG = int(sys.argv[3])
     
-    server(server_ip, server_port, sws)
+    run_server(SERVER_IP, SERVER_PORT, SWS_ARG)
