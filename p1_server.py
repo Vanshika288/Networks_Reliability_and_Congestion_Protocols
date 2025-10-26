@@ -225,7 +225,7 @@ def run_server(server_ip, server_port, sws):
 
     # --- 5. Send EOF ---
     print("All file data acknowledged. Sending EOF.")
-    eof_packet = make_packet(file_size, EOF_MSG, int(time.time() * 1000))
+    eof_packet = make_packet(file_size, EOF_MSG, int(time.time() * 1000) & 0xFFFFFFFF)
     for _ in range(5): # Send EOF 5 times for reliability
         sock.sendto(eof_packet, client_addr)
         time.sleep(0.01)
