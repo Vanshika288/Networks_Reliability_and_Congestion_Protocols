@@ -84,15 +84,21 @@ def process_ack(ack_packet):
         current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
         
         # --- 1. Process SACKs (Karn's Rule applied here) ---
-        if sack_start < sack_end and sack_start in in_flight_packets:
+        if sack_start < sack_end:
             stats["sacks_processed"] += 1
-            # Remove SACKed packet from in-flight window
-            _packet, _send_time, retrans_count = in_flight_packets.pop(sack_start)
-            
-            # Karn's Rule: Only update RTT for non-retransmitted packets
-            if retrans_count == 0:
-                sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
-                rtt_estimator.update(sample_rtt_ms / 1000.0)
+
+            # Find all packets fully covered by SACK range
+            sack_keys = [seq for seq in list(in_flight_packets.keys())
+                        if sack_start <= seq < sack_end]
+
+            for seq in sack_keys:
+                packet, send_time, retrans_count = in_flight_packets.pop(seq)
+                
+                # RTT update (Karn’s rule)
+                if retrans_count == 0:
+                    sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
+                    rtt_estimator.update(sample_rtt_ms / 1000.0)
+
 
         # --- 2. Process Cumulative ACK (Karn's Rule applied here) ---
         if cum_ack > base_seq:

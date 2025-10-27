@@ -37,20 +37,40 @@ def make_ack_packet(cum_ack, ts_echo, sack_block):
         
     return struct.pack(PACKET_FORMAT, cum_ack, ts_echo, sack_start, sack_end, b'\x00'*4)
 
-def get_sack_block():
-    """Finds the first non-contiguous block in the buffer for SACK."""
-    if not receiver_buffer:
-        return None
+# def get_sack_block():
+#     """Finds the first non-contiguous block in the buffer for SACK."""
+#     if not receiver_buffer:
+#         return None
     
-    # Find the first key (sequence number) in the buffer
-    first_ooo_seq = min(receiver_buffer.keys())
+#     # Find the first key (sequence number) in the buffer
+#     first_ooo_seq = min(receiver_buffer.keys())
     
-    # The SACK block covers just this one packet
-    # A more complex implementation would merge contiguous blocks in the buffer
-    sack_start = first_ooo_seq
-    sack_end = first_ooo_seq + len(receiver_buffer[first_ooo_seq])
+#     # The SACK block covers just this one packet
+#     # A more complex implementation would merge contiguous blocks in the buffer
+#     sack_start = first_ooo_seq
+#     sack_end = first_ooo_seq + len(receiver_buffer[first_ooo_seq])
     
-    return (sack_start, sack_end)
+#     return (sack_start, sack_end)
+
+def get_sack_range(buffer, base_seq):
+    """Return (start, end) of the largest contiguous received block above base_seq."""
+    received = sorted(buffer.keys())
+    sack_start, sack_end = None, None
+
+    for seq in received:
+        if seq > base_seq:
+            if sack_start is None:
+                sack_start = seq
+                sack_end = seq + len(buffer[seq])
+            elif seq == sack_end:
+                sack_end += len(buffer[seq])
+            else:
+                break  # non-contiguous gap
+
+    if sack_start is None:
+        sack_start, sack_end = 0, 0
+    return sack_start, sack_end
+
 
 def process_data_packet(packet, f_out):
     """Processes an incoming data packet and returns an ACK packet to send."""
@@ -98,7 +118,7 @@ def process_data_packet(packet, f_out):
             receiver_buffer[seq] = data
             
     # --- 3. Generate ACK with SACK ---
-    sack_block = get_sack_block()
+    sack_block = get_sack_range(receiver_buffer, expected_seq)
     ack_packet = make_ack_packet(expected_seq, ts, sack_block)
     return ack_packet
 

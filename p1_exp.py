@@ -62,7 +62,7 @@ def run(expname):
     delay_list, loss_list, jitter_list = [], [], []
 
     if expname == "loss":
-        loss_list = [x for x in range(1,6)]
+        loss_list = [x for x in range(1,2)]
         delay_list = [20]     
         jitter_list = [0]   
     elif expname == "jitter":
