@@ -82,6 +82,9 @@ def process_ack(ack_packet):
     with state_lock:
         stats["acks_received"] += 1
         current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
+        # --- 1. Update RTT once per ACK (timestamps make Karn’s Rule unnecessary) ---
+        sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
+        rtt_estimator.update(sample_rtt_ms / 1000.0)
         
         # --- 1. Process SACKs (Karn's Rule applied here) ---
         if sack_start < sack_end:
@@ -93,11 +96,6 @@ def process_ack(ack_packet):
 
             for seq in sack_keys:
                 packet, send_time, retrans_count = in_flight_packets.pop(seq)
-                
-                # RTT update (Karn’s rule)
-                if retrans_count == 0:
-                    sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
-                    rtt_estimator.update(sample_rtt_ms / 1000.0)
 
 
         # --- 2. Process Cumulative ACK (Karn's Rule applied here) ---
@@ -111,14 +109,6 @@ def process_ack(ack_packet):
             for seq in acked_keys:
                 _packet, _send_time, retrans_count = in_flight_packets.pop(seq)
                 
-                # Karn's Rule: Only update RTT for the packet that triggered this ACK
-                # We assume the ts_echo corresponds to the packet that triggered this cum_ack
-                # This is a simplification; a more complex impl would match ts_echo.
-                # For simplicity, we'll only use the *last* non-retransmitted ACK.
-                if retrans_count == 0 and seq == max(acked_keys):
-                     sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
-                     rtt_estimator.update(sample_rtt_ms / 1000.0)
-                     
         elif cum_ack == base_seq:
             # --- 3. Process Duplicate ACK ---
             dup_ack_counts[cum_ack] = dup_ack_counts.get(cum_ack, 0) + 1
