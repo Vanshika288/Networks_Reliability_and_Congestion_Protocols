@@ -1,0 +1,41 @@
+
+### fixed bandwidth (loss = 0, delay_c2 = 5 ms, udp_off_mean = None)
+
+bw,link_util,jfi
+100,0.54,0.99
+200,0.29,0.99
+300,0.19,0.99
+400,0.17,0.99
+500,0.13,0.99
+600,0.10,0.99
+700,0.10,0.99
+800,0.058,0.99
+900,0.055,0.99
+1000,0.056,0.99
+
+
+### varying loss (bw = 100, delay_c2 = 5 ms, udp_off_mean = None)
+
+loss,link_util,jfi 
+0.5,0.068,0.99
+1.0,0.035,0.99
+1.5,0.023,0.99
+2.0,0.017,0.99
+
+
+### asymmetric flows  (bw = 100, loss = 0, udp_off_mean = None)
+
+delay_c2_ms,link_util,jfi 
+5,0.54,0.99
+10,0.55,0.97
+15,0.51,0.92
+20,0.55,0.83
+25,0.54,0.80
+
+
+###  background udp (bw = 100, loss = 0, delay_c2 = 5 ms)
+
+udp_off_mean,link_util,jfi 
+1.5,0.25,0.99
+0.8,0.17,0.99
+0.5,0.099,0.99
