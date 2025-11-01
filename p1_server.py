@@ -15,7 +15,7 @@ EOF_MSG = b'EOF'
 
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.5, max_rto=60.0):
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.04, max_rto=60.0):
         self.alpha = alpha
         self.beta = beta
         self.srtt = 0.0

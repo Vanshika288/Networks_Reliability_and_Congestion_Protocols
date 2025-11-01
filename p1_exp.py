@@ -99,16 +99,28 @@ def run(expname):
                     h2 = net.get('h2')
 
                     start_time = time.time()
-                    
-                    h1.cmd(f"python3 p1_server.py {SERVER_IP} {SERVER_PORT} {SWS} &")
-                    result = h2.cmd(f"python3 p1_client.py {SERVER_IP} {SERVER_PORT}")
+                    # --- REPLACEMENT CODE ---
+
+                    # Define log filenames for this specific run
+                    server_log = f"server_loss{LOSS}_delay{DELAY}_jitter{JITTER}_iter{i}.log"
+                    client_log = f"client_loss{LOSS}_delay{DELAY}_jitter{JITTER}_iter{i}.log"
+                    print(f"    Logging server output to {server_log}")
+                    print(f"    Logging client output to {client_log}")
+
+                    # Run commands, redirecting stdout/stderr (2>&1) to the log files
+                    h1.cmd(f"python3 p1_server.py {SERVER_IP} {SERVER_PORT} {SWS} > {server_log} 2>&1 &")
+                    h2.cmd(f"python3 p1_client.py {SERVER_IP} {SERVER_PORT} > {client_log} 2>&1")
+
+                    # --- END OF REPLACEMENT ---
+                    # h1.cmd(f"python3 p1_server.py {SERVER_IP} {SERVER_PORT} {SWS} &")
+                    # result = h2.cmd(f"python3 p1_client.py {SERVER_IP} {SERVER_PORT}")
                     end_time = time.time()
                     ttc = end_time - start_time
 
                     md5_hash = compute_md5(OUTFILE)
                     # write the result to a file
                     f_out.write(f"{i},{LOSS},{DELAY},{JITTER},{md5_hash},{ttc}\n")
-
+                    time.sleep(3)
                     # Stop the network
                     net.stop()
 
