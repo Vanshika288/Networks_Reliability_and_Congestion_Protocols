@@ -12,10 +12,11 @@ HEADER_LEN = 20
 PACKET_FORMAT = '!IIII4s' # 4+4+4+4+4 = 20 bytes
 DATA_LEN = MAX_PAYLOAD_SIZE - HEADER_LEN # 1180 bytes
 EOF_MSG = b'EOF'
+FAST_RETRANSMIT_K = 2
 
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.04, max_rto=60.0):
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.0, max_rto=60.0):
         self.alpha = alpha
         self.beta = beta
         self.srtt = 0.0
@@ -53,7 +54,7 @@ file_size = 0
 SWS = 0                 # Sender Window Size (in packets)
 client_addr = None
 transfer_complete = False
-state_lock = threading.Lock()
+state_lock = threading.RLock()
 
 # --- Statistics ---
 stats = {
@@ -69,6 +70,27 @@ def make_packet(seq, data, timestamp_ms):
     # SACK fields (sack_start, sack_end) are 0 for data packets
     header = struct.pack(PACKET_FORMAT, seq, timestamp_ms, 0, 0, b'\x00'*4)
     return header + data
+
+def try_send_next_packets(sock):
+    """
+    Fill the sender window as long as space is available.
+    Called from both the main loop and the ACK handler to make sending ACK-driven.
+    """
+    global next_seq, file_size, stats, in_flight_packets, SWS
+
+    # We hold state_lock inside caller; but double-checking here to be safe:
+    with state_lock:
+        while len(in_flight_packets) < SWS and next_seq < file_size:
+            data_chunk_size = min(DATA_LEN, file_size - next_seq)
+            data_chunk = file_data[next_seq : next_seq + data_chunk_size]
+            timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
+
+            packet = make_packet(next_seq, data_chunk, timestamp_ms)
+            sock.sendto(packet, client_addr)
+
+            in_flight_packets[next_seq] = (packet, time.time(), 0)
+            stats["packets_sent"] += 1
+            next_seq += data_chunk_size
 
 def process_ack(ack_packet):
     """Processes an incoming ACK packet."""
@@ -92,12 +114,19 @@ def process_ack(ack_packet):
             if retrans_count > 0:
                 was_base_retransmitted = True
         # --- 1. Process SACKs (Karn's Rule applied here) ---
-        if sack_start < sack_end:
+        if sack_end != 0:
             stats["sacks_processed"] += 1
-
+            # sack_end is actually ooo_ack
+            sacked_packets = []
+            offset = sack_start
+            # vary i from 0 to 31
+            for i in range(32):
+                if (sack_end >> i) & 1:
+                    sacked_seq = sack_start + (i) * DATA_LEN
+                    sacked_packets.append(sacked_seq)
             # Find all packets fully covered by SACK range
             sack_keys = [seq for seq in list(in_flight_packets.keys())
-                        if sack_start <= seq < sack_end]
+                        if seq in sacked_packets]
             print(f"--- SACK received for seqs {sack_keys} ---")
 
             for seq in sack_keys:
@@ -122,15 +151,15 @@ def process_ack(ack_packet):
         elif cum_ack == base_seq:
             # --- 3. Process Duplicate ACK ---
             dup_ack_counts[cum_ack] = dup_ack_counts.get(cum_ack, 0) + 1
-            
             # Fast Retransmit Trigger
-            if dup_ack_counts[cum_ack] == 3:
-                if base_seq in in_flight_packets:
+            if base_seq in in_flight_packets:
+                old_packet,_,retrans_count = in_flight_packets[base_seq]
+                if dup_ack_counts[cum_ack] == 3 + FAST_RETRANSMIT_K * retrans_count:
                     print(f"--- FAST RETRANSMIT for seq {base_seq} ---")
                     stats["fast_retransmits"] += 1
                     stats["packets_retransmitted"] += 1
                     
-                    old_packet, _st, retrans_count = in_flight_packets[base_seq]
+                    # old_packet, _st, retrans_count = in_flight_packets[base_seq]
                     data_chunk = old_packet[HEADER_LEN:]
                     new_timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
                     new_packet = make_packet(base_seq, data_chunk, new_timestamp_ms)
@@ -138,6 +167,7 @@ def process_ack(ack_packet):
                     # Update send time and retransmit count
                     in_flight_packets[base_seq] = (new_packet, time.time(), retrans_count + 1)
                     dup_ack_counts[cum_ack] = 0 # Reset after retransmit
+        try_send_next_packets(sock)
 
 def ack_receiver_thread(sock):
     """Thread to continuously listen for ACK packets."""
@@ -218,6 +248,7 @@ def run_server(server_ip, server_port, sws):
                     new_packet = make_packet(seq, data_chunk, new_timestamp_ms)
                     sock.sendto(new_packet, client_addr)
                     in_flight_packets[seq] = (new_packet, time.time(), retrans_count + 1)
+                    dup_ack_counts[seq] =  0# Reset duplicate ACK count after timeout retransmit
 
             # --- 4b. Send New Packets ---
             while len(in_flight_packets) < SWS and next_seq < file_size:

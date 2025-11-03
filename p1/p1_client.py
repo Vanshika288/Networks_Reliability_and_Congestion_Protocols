@@ -55,21 +55,22 @@ def make_ack_packet(cum_ack, ts_echo, sack_block):
 def get_sack_range(buffer, base_seq):
     """Return (start, end) of the largest contiguous received block above base_seq."""
     received = sorted(buffer.keys())
-    sack_start, sack_end = None, None
-
+    sack_start = None
+    # an int representing using 0 and 1 which sequences have been received -> 4bytes -> 32 sequences checked
+    ooo_acks = 0
     for seq in received:
         if seq > base_seq:
             if sack_start is None:
                 sack_start = seq
-                sack_end = seq + len(buffer[seq])
-            elif seq == sack_end:
-                sack_end += len(buffer[seq])
+                ooo_acks = 1
             else:
-                break  # non-contiguous gap
+                diff = (seq - sack_start)/(1180)
+                if diff < 32:
+                    ooo_acks |= (1 << int(diff))
 
     if sack_start is None:
-        sack_start, sack_end = 0, 0
-    return sack_start, sack_end
+        return 0, 0
+    return sack_start, ooo_acks
 
 
 def process_data_packet(packet, f_out):
