@@ -1,0 +1,9 @@
+I have provided you the assignment in assignment4.md. I have also provided you my implementation of my p1_client.py and p1_server.py. I have thought of a clever optimisation that can be done.
+
+1. Currently my sequence numbers are byte oriented. I want them to be packet oriented, so that it takes less number of bits to represent a sequence number.
+
+2. Next, I want the sequence numbers to take least amount of bits as possible, so that i can fill in as many SACK window in my header as possible. To do that, my sequence numbers should be equal to 2*SWS. Client does not know the SWS, only the server knows that. So the server must send the SWS in its packet header(in the optional section only). Using that the client will know the number of sequence numbers that are possible. The buffer at the client is currently linear, you will have to change that to a circular buffer. According to the size of sequence numbers, you can fit as many SACK packets as possible in the optional space of header.
+
+3. EXAMPLE: if the SWS is of 5 packets, then sequence numbers will be 0 to 9, which will take 3 bits, hence 1 byte. So we need 1 byte to represent the sequence number. Optional header length is 16 bytes. 4 bytes out of that will be timestamp. So we have 12 bytes left and we can send 6 SACKS into this. 
+
+Implement this correctly and give me the complete final code. 
