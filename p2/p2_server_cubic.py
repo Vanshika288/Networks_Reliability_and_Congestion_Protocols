@@ -387,7 +387,11 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
 
             # --- 4b. Send New Packets ---
             # --- CUBIC CHANGE: Use byte-based cwnd check ---
-            in_flight_bytes = next_seq - base_seq
+            # in_flight_bytes = next_seq - base_seq
+            # calc. in_flight_bytes according to remaining packets in in_flight_packets
+            for seq in in_flight_packets:
+                if seq >= base_seq and seq < next_seq:
+                    in_flight_bytes += DATA_LEN
             while (in_flight_bytes + DATA_LEN) <= cwnd and next_seq < file_size:
                 data_chunk_size = min(DATA_LEN, file_size - next_seq)
                 data_chunk = file_data[next_seq : next_seq + data_chunk_size]
@@ -399,7 +403,7 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
                 in_flight_packets[next_seq] = (packet, time.time(), 0)
                 stats["packets_sent"] += 1
                 next_seq += data_chunk_size
-                in_flight_bytes = next_seq - base_seq # Update for loop check
+                in_flight_bytes += data_chunk_size # Update for loop check
         
         time.sleep(0.001) 
 
