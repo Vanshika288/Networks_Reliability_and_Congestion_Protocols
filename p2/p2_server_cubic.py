@@ -140,9 +140,9 @@ def try_send_next_packets(sock):
         in_flight_bytes = 0
         for seq in in_flight_packets:
             if seq >= base_seq and seq < next_seq:
-                in_flight_bytes += in_flight_packets[seq][0][HEADER_LEN:].__len__()
+                in_flight_bytes += in_flight_packets[seq][0].__len__()
         
-        while (in_flight_bytes + DATA_LEN) <= cwnd and next_seq < file_size:
+        while (in_flight_bytes + MSS) <= cwnd and next_seq < file_size:
             data_chunk_size = min(DATA_LEN, file_size - next_seq)
             data_chunk = file_data[next_seq : next_seq + data_chunk_size]
             timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
@@ -155,7 +155,7 @@ def try_send_next_packets(sock):
             next_seq += data_chunk_size
             
             # Update in-flight bytes for next loop iteration
-            in_flight_bytes += data_chunk_size
+            in_flight_bytes += data_chunk_size + HEADER_LEN
 
 def process_ack(ack_packet):
     """Processes an incoming ACK packet."""
@@ -332,29 +332,18 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
             
             # --- CUBIC CHANGE: Handle RTO as congestion event ---
             if packets_to_retransmit:
-                seq_to_retransmit = min(packets_to_retransmit) # Retransmit lowest timed-out packet
-                
-                if seq_to_retransmit in in_flight_packets: # Check if not SACKed
-                    print(f"--- TIMEOUT for seq {seq_to_retransmit} ---")
-                    
-                    if seq_to_retransmit > last_loss_seq:
-                        handle_congestion_event(is_timeout=True)
-                        # After timeout, CUBIC resets cwnd=1MSS and enters SLOW_START
-                        # We must also clear the dup_ack_counts
-                        dup_ack_counts.clear()
-
-                    stats["packets_retransmitted"] += 1
-                    old_packet, _st, retrans_count = in_flight_packets[seq_to_retransmit]
-                    data_chunk = old_packet[HEADER_LEN:]
-                    new_timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
-                    new_packet = make_packet(seq_to_retransmit, data_chunk, new_timestamp_ms)
-                    sock.sendto(new_packet, client_addr)
-                    in_flight_packets[seq_to_retransmit] = (new_packet, time.time(), retrans_count + 1)
-                    
-                    # After a timeout, don't send new packets immediately.
-                    # Let the retransmit go out and wait for its ACK.
-                    # We continue the loop to check for other timeouts if any.
-                    continue 
+                handle_congestion_event(is_timeout=True)
+                for seq in packets_to_retransmit:
+                    if seq in in_flight_packets: # Check if not SACKed in the meantime
+                        print(f"--- TIMEOUT for seq {seq} (RTO: {current_packet_rto:.2f}s) ---")
+                        stats["packets_retransmitted"] += 1
+                        old_packet, _st, retrans_count = in_flight_packets[seq]
+                        data_chunk = old_packet[HEADER_LEN:]
+                        new_timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
+                        new_packet = make_packet(seq, data_chunk, new_timestamp_ms)
+                        sock.sendto(new_packet, client_addr)
+                        in_flight_packets[seq] = (new_packet, time.time(), retrans_count + 1)
+                        dup_ack_counts[seq] =  0# Reset duplicate ACK count after timeout retransmit
 
             # --- 4b. Send New Packets ---
             # --- CUBIC CHANGE: Use byte-based cwnd check ---
@@ -363,8 +352,8 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
             in_flight_bytes = 0
             for seq in in_flight_packets:
                 if seq >= base_seq and seq < next_seq:
-                    in_flight_bytes += in_flight_packets[seq][0][HEADER_LEN:].__len__()
-            while (in_flight_bytes + DATA_LEN) <= cwnd and next_seq < file_size:
+                    in_flight_bytes += in_flight_packets[seq][0].__len__()
+            while (in_flight_bytes + MSS) <= cwnd and next_seq < file_size:
                 data_chunk_size = min(DATA_LEN, file_size - next_seq)
                 data_chunk = file_data[next_seq : next_seq + data_chunk_size]
                 timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
@@ -375,7 +364,7 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
                 in_flight_packets[next_seq] = (packet, time.time(), 0)
                 stats["packets_sent"] += 1
                 next_seq += data_chunk_size
-                in_flight_bytes += data_chunk_size # Update for loop check
+                in_flight_bytes += data_chunk_size + HEADER_LEN # Update for loop check
         
         time.sleep(0.001) 
 
