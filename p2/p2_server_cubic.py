@@ -136,7 +136,11 @@ def try_send_next_packets(sock):
     with state_lock:
         # --- CUBIC CHANGE: Window check is now byte-based using cwnd ---
         # Calculate in-flight bytes
-        in_flight_bytes = next_seq - base_seq
+        # in_flight_bytes = next_seq - base_seq
+        in_flight_bytes = 0
+        for seq in in_flight_packets:
+            if seq >= base_seq and seq < next_seq:
+                in_flight_bytes += in_flight_packets[seq][0][HEADER_LEN:].__len__()
         
         while (in_flight_bytes + DATA_LEN) <= cwnd and next_seq < file_size:
             data_chunk_size = min(DATA_LEN, file_size - next_seq)
@@ -151,7 +155,7 @@ def try_send_next_packets(sock):
             next_seq += data_chunk_size
             
             # Update in-flight bytes for next loop iteration
-            in_flight_bytes = next_seq - base_seq
+            in_flight_bytes += data_chunk_size
 
 def process_ack(ack_packet):
     """Processes an incoming ACK packet."""
@@ -356,9 +360,10 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
             # --- CUBIC CHANGE: Use byte-based cwnd check ---
             # in_flight_bytes = next_seq - base_seq
             # calc. in_flight_bytes according to remaining packets in in_flight_packets
+            in_flight_bytes = 0
             for seq in in_flight_packets:
                 if seq >= base_seq and seq < next_seq:
-                    in_flight_bytes += DATA_LEN
+                    in_flight_bytes += in_flight_packets[seq][0][HEADER_LEN:].__len__()
             while (in_flight_bytes + DATA_LEN) <= cwnd and next_seq < file_size:
                 data_chunk_size = min(DATA_LEN, file_size - next_seq)
                 data_chunk = file_data[next_seq : next_seq + data_chunk_size]
