@@ -15,7 +15,7 @@ EOF_MSG = b'EOF'
 FAST_RETRANSMIT_K = 2
 
 # --- CUBIC CHANGE: CUBIC Hyperparameters ---
-MSS = DATA_LEN  # Max Segment Size in bytes (data only)
+MSS = MAX_PAYLOAD_SIZE  # Max Segment Size in bytes (data only)
 INITIAL_CWND = 1 * MSS
 CUBIC_C = 0.4
 CUBIC_BETA_DECREASE = 0.7 # Multiplicative decrease factor (cwnd = cwnd * B)
@@ -126,10 +126,6 @@ def handle_congestion_event(is_timeout):
         print(f"--- CONGESTION (FAST RETRANSMIT) ---")
 
     print(f"  w_max={w_max:.0f}, ssthresh={ssthresh:.0f}, cwnd={cwnd:.0f}, K={k_cubic:.2f}")
-    
-    # Mark the packet that caused this, to avoid multiple reductions per window
-    last_loss_seq = base_seq
-
 
 def try_send_next_packets(sock):
     """
@@ -204,12 +200,13 @@ def process_ack(ack_packet):
                 rtt_estimator.update(sample_rtt_ms / 1000.0)
             
             # --- CUBIC CHANGE: Handle CWND increase on new ACK ---
-            bytes_acked = cum_ack - base_seq
+            # bytes_acked = cum_ack - base_seq
             
             if congestion_state == "SLOW_START":
-                cwnd += bytes_acked # Aggressive exponential growth (1 MSS per ACK)
+                cwnd += MSS # Aggressive exponential growth (1 MSS per ACK) -> my modification
                 if cwnd >= ssthresh:
                     congestion_state = "CONGESTION_AVOIDANCE"
+                    cwnd = ssthresh # -> my modification
                     # print("--- SLOW START -> CONGESTION AVOIDANCE ---")
                     
             elif congestion_state == "CONGESTION_AVOIDANCE":
@@ -217,34 +214,7 @@ def process_ack(ack_packet):
                 current_time = time.time()
                 t_elapsed = current_time - t_epoch
                 
-                # Calculate target W_cubic(t) using the slide's formula
-                target_cwnd = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
-                
-                # Get current RTT (or RTO as fallback)
-                srtt = rtt_estimator.get_srtt()
-                rtt = srtt if srtt > 0.0 else rtt_estimator.get_rto()
-
-                # Calculate W_tcp (Reno-style growth for TCP friendliness)
-                # w_tcp(t) = w_max * beta_decrease + 3*(1-beta_decrease)/(1+beta_decrease) * (t/RTT) * MSS
-                # We use a simpler Reno AI: 1 MSS / RTT
-                w_tcp_increase_per_rtt = (MSS * MSS) / cwnd
-                
-                if target_cwnd > cwnd:
-                    # Convex growth (probing)
-                    # Increase = (W_cubic(t) - cwnd) / cwnd
-                    cwnd_increase = ((target_cwnd - cwnd) / cwnd) * MSS
-                else:
-                    # Concave growth (TCP friendly)
-                    # Use standard Reno Additive Increase
-                    cwnd_increase = w_tcp_increase_per_rtt
-                
-                # Scale increase per ACK (not per RTT)
-                # An RTT has (cwnd / MSS) packets.
-                # Increase per ACK = Increase_per_RTT / (cwnd / MSS)
-                if cwnd > 0:
-                    cwnd += (cwnd_increase * MSS) / cwnd
-                else:
-                    cwnd += INITIAL_CWND # Safety check
+                cwnd = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
 
             # --- End CUBIC CHANGE ---
             
@@ -268,8 +238,7 @@ def process_ack(ack_packet):
                     
                     # --- CUBIC CHANGE: Trigger congestion event ---
                     # Only trigger if this packet hasn't caused a reduction before
-                    if base_seq > last_loss_seq:
-                        handle_congestion_event(is_timeout=False)
+                    handle_congestion_event(is_timeout=False)
                     
                     stats["packets_retransmitted"] += 1
                     
@@ -281,7 +250,6 @@ def process_ack(ack_packet):
                     in_flight_packets[base_seq] = (new_packet, time.time(), retrans_count + 1)
                     dup_ack_counts[cum_ack] = 0 # Reset after retransmit
                     
-        # --- CUBIC CHANGE: Try to send more packets after processing ACK ---
         try_send_next_packets(sock)
 
 def ack_receiver_thread(sock):
@@ -365,7 +333,6 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
                 if seq_to_retransmit in in_flight_packets: # Check if not SACKed
                     print(f"--- TIMEOUT for seq {seq_to_retransmit} ---")
                     
-                    # Trigger congestion event *only if* it's a new loss
                     if seq_to_retransmit > last_loss_seq:
                         handle_congestion_event(is_timeout=True)
                         # After timeout, CUBIC resets cwnd=1MSS and enters SLOW_START
