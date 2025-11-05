@@ -17,13 +17,13 @@ FAST_RETRANSMIT_K = 2
 # --- CUBIC CHANGE: CUBIC Hyperparameters ---
 MSS = MAX_PAYLOAD_SIZE  # Max Segment Size in bytes (data only)
 INITIAL_CWND = 1 * MSS
-CUBIC_C = 0.4
+CUBIC_C = 0.8
 CUBIC_BETA_DECREASE = 0.7 # Multiplicative decrease factor (cwnd = cwnd * B)
 CUBIC_BETA_K = 1.0 - CUBIC_BETA_DECREASE # This is the 'beta' from the slide's K formula
 
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.2, max_rto=60.0): # --- CUBIC CHANGE: Set min_rto to 200ms ---
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.01, max_rto=60.0): # --- CUBIC CHANGE: Set min_rto to 200ms ---
         self.alpha = alpha
         self.beta = beta
         self.srtt = 0.0
@@ -69,12 +69,11 @@ state_lock = threading.RLock()
 
 # --- CUBIC CHANGE: Congestion Control State Variables ---
 cwnd = INITIAL_CWND
-ssthresh = float('inf') # Start with "infinite" ssthresh
+ssthresh = float('inf') # Start with "infinite" ssthresh # to do
 congestion_state = "SLOW_START" # States: "SLOW_START", "CONGESTION_AVOIDANCE"
 w_max = 0.0             # Window max (W_max) from CUBIC formula
 t_epoch = 0.0           # Time of last congestion event
 k_cubic = 0.0           # K from CUBIC formula
-last_loss_seq = -1      # Track last sequence number that triggered congestion
 
 # --- Statistics ---
 stats = {
@@ -97,13 +96,13 @@ def handle_congestion_event(is_timeout):
     """
     Called on Fast Retransmit or RTO to update CUBIC state.
     """
-    global cwnd, ssthresh, w_max, t_epoch, k_cubic, congestion_state, last_loss_seq
+    global cwnd, ssthresh, w_max, t_epoch, k_cubic, congestion_state
     
     t_epoch = time.time() # Record time of congestion
     w_max = cwnd          # Store current window as W_max
     
     # Calculate new ssthresh (multiplicative decrease)
-    ssthresh = cwnd * CUBIC_BETA_DECREASE
+    ssthresh = max(cwnd * CUBIC_BETA_DECREASE, 2 * MSS)
     
     # Calculate K (time to reach W_max again) using the slide's formula
     # K = cubic_root(W_max * beta / C)
@@ -206,19 +205,65 @@ def process_ack(ack_packet):
             # --- CUBIC CHANGE: Handle CWND increase on new ACK ---
             # bytes_acked = cum_ack - base_seq
             
+            # if congestion_state == "SLOW_START":
+            #     cwnd += MSS # Aggressive exponential growth (1 MSS per ACK) -> my modification
+            #     if cwnd >= ssthresh:
+            #         congestion_state = "CONGESTION_AVOIDANCE"
+            #         cwnd = ssthresh # -> my modification
+            #         # print("--- SLOW START -> CONGESTION AVOIDANCE ---")
+                    
+            # elif congestion_state == "CONGESTION_AVOIDANCE":
+            #     # --- CUBIC Growth Logic ---
+            #     current_time = time.time()
+            #     t_elapsed = current_time - t_epoch
+                
+            #     cwnd = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
+
+            acked_bytes = cum_ack - base_seq
+
+
             if congestion_state == "SLOW_START":
-                cwnd += MSS # Aggressive exponential growth (1 MSS per ACK) -> my modification
+                # Exponential growth: increase by acked_bytes
+                cwnd += acked_bytes
+                
+                # CHANGE #9: Fixed transition to congestion avoidance
+                # OLD: if cwnd >= ssthresh:
+                #          congestion_state = "CONGESTION_AVOIDANCE"
+                #          cwnd = ssthresh  # ← BUG: This drops the window!
+                # NEW: Don't modify cwnd when transitioning
+                # WHY: Reducing cwnd defeats the purpose of growing it
+                #      Just change state, let cwnd continue from current value
                 if cwnd >= ssthresh:
                     congestion_state = "CONGESTION_AVOIDANCE"
-                    cwnd = ssthresh # -> my modification
-                    # print("--- SLOW START -> CONGESTION AVOIDANCE ---")
+                    print(f"[SLOW_START -> CONG_AVOID] cwnd={cwnd:.0f}, ssthresh={ssthresh:.0f}")
                     
             elif congestion_state == "CONGESTION_AVOIDANCE":
-                # --- CUBIC Growth Logic ---
+                # CHANGE #10: Fixed CUBIC growth formula (MOST CRITICAL BUG)
+                # OLD: cwnd = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
+                # NEW: Calculate target, then increment towards it
+                # WHY: The old code set cwnd to an absolute value, which:
+                #      - Can jump wildly (e.g., from 1KB to megabytes instantly)
+                #      - Can go negative when t_elapsed < k_cubic
+                #      - Completely ignores current network state
+                #      CUBIC should incrementally grow towards the target, not jump to it!
+                
+                # Calculate CUBIC target window
                 current_time = time.time()
                 t_elapsed = current_time - t_epoch
                 
-                cwnd = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
+                # W_cubic(t) = C * (t - K)^3 + W_max
+                w_cubic = CUBIC_C * ((t_elapsed - k_cubic) ** 3) + w_max
+                
+                # Ensure w_cubic is at least current cwnd (never decrease in CA without loss)
+                w_cubic = max(w_cubic, cwnd)
+                
+                # Increment cwnd towards w_cubic gradually
+                # Standard approach: increment per ACK by (target - current) / current
+                if cwnd > 0:
+                    cwnd_increment = (w_cubic - cwnd) / cwnd * acked_bytes
+                    # Ensure minimum progress (at least 1 MSS worth per cwnd bytes acked)
+                    cwnd_increment = max(cwnd_increment, acked_bytes / cwnd)
+                    cwnd += cwnd_increment
 
             # --- End CUBIC CHANGE ---
             
@@ -241,9 +286,10 @@ def process_ack(ack_packet):
                 if dup_ack_counts[cum_ack] == 3 + FAST_RETRANSMIT_K * retrans_count:
                     
                     # --- CUBIC CHANGE: Trigger congestion event ---
-                    # Only trigger if this packet hasn't caused a reduction before
+                    print(f"--- FAST RETRANSMIT for seq {base_seq} ---")
                     handle_congestion_event(is_timeout=False)
                     
+                    stats["fast_retransmits"] += 1
                     stats["packets_retransmitted"] += 1
                     
                     data_chunk = old_packet[HEADER_LEN:]
@@ -279,7 +325,7 @@ def run_server(server_ip, server_port): # --- CUBIC CHANGE: Removed sws argument
     
     # --- CUBIC CHANGE: Initialize CC state ---
     cwnd = INITIAL_CWND
-    ssthresh = float('inf')
+    ssthresh = float('inf') #to do
     congestion_state = "SLOW_START"
     t_epoch = time.time()
     k_cubic = 0.0
