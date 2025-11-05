@@ -129,6 +129,12 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     if not os.path.exists(logs_dir):
         os.makedirs(logs_dir)
         print(f"[DEBUG] Created logs directory: {logs_dir}")
+    
+    # Create plots directory if it doesn't exist
+    plots_dir = 'plots'
+    if not os.path.exists(plots_dir):
+        os.makedirs(plots_dir)
+        print(f"[DEBUG] Created plots directory: {plots_dir}")
 
     # prefixes used by the client (must match client's behavior)
     pref_c1 = "1"
@@ -162,9 +168,13 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     # Define log files for servers
     s1_log = f"{logs_dir}/s1_server_bw{bw}_loss{loss}_delay{delay_c2_ms}_iter{iteration}.log"
     s2_log = f"{logs_dir}/s2_server_bw{bw}_loss{loss}_delay{delay_c2_ms}_iter{iteration}.log"
+    
+    # Define output prefixes for plots
+    s1_plot_prefix = f"{plots_dir}/s1_bw{bw}_loss{loss}_delay{delay_c2_ms}_iter{iteration}"
+    s2_plot_prefix = f"{plots_dir}/s2_bw{bw}_loss{loss}_delay{delay_c2_ms}_iter{iteration}"
 
-    s1_pid_raw = s1.cmdPrint(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} > {s1_log} 2>&1 & echo $!'").strip()
-    s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} > {s2_log} 2>&1 & echo $!'").strip()
+    s1_pid_raw = s1.cmdPrint(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} {s1_plot_prefix} > {s1_log} 2>&1 & echo $!'").strip()
+    s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} {s2_plot_prefix} > {s2_log} 2>&1 & echo $!'").strip()
     s1_pid = s1_pid_raw.split()[0] if s1_pid_raw else None
     s2_pid = s2_pid_raw.split()[0] if s2_pid_raw else None
     print(f"started server s1 pid: {s1_pid} (log: {s1_log}), s2 pid: {s2_pid} (log: {s2_log})")
@@ -236,6 +246,10 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
 
     # Stop the network
     net.stop()
+    
+    # ADDITION: Wait for plots to be generated and saved
+    print("[DEBUG] Waiting for plots to be generated and saved...")
+    time.sleep(3)  # Give servers time to finish plot generation
 
     # compute durations
     dur_c1 = max(end_time_c1 - start_time_c1, 1e-9)
@@ -279,7 +293,11 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     print(f"dur1={dur_c1:.3f}s dur2={dur_c2:.3f}s size1={size1} size2={size2} thr1={thr1_mbps:.3f} thr2={thr2_mbps:.3f} link_util={link_util:.3f} jfi={jfi:.3f}")
     print(f"[DEBUG] Server logs: {s1_log}, {s2_log}")
     print(f"[DEBUG] Client logs: {c1_log}, {c2_log}")
-
+    print(f"[DEBUG] Server plots: {s1_plot_prefix}_analysis.png, {s2_plot_prefix}_analysis.png")
+    
+    # ADDITION: Additional delay between trials for cleanup
+    print("[DEBUG] Trial complete. Waiting before next trial...")
+    time.sleep(2)
 
 
 def experiment_fixed_bandwidth(exp_out, num_iterations=1):
@@ -294,6 +312,9 @@ def experiment_fixed_bandwidth(exp_out, num_iterations=1):
         print(f"[fixed_bw] bw={bw}Mbps -> buffer_size={buf_packets} packets (RTT={RTT_MS}ms)")
         for i in range(num_iterations):
             run_trial(exp_out, bw=bw,  iteration=i, buffer_size=buf_packets)
+            # ADDITION: Extra delay between different bandwidth experiments
+            print(f"[DEBUG] Completed trial for bw={bw}Mbps, iter={i}. Pausing before next trial...")
+            time.sleep(4)
 
 
 def experiment_varying_loss(exp_out, num_iterations=1):
@@ -301,12 +322,18 @@ def experiment_varying_loss(exp_out, num_iterations=1):
     for loss in loss_rates:
         for i in range(num_iterations):
             run_trial(exp_out, bw=100, loss=loss, iteration=i,buffer_size=420)
+            # ADDITION: Extra delay between different loss rate experiments
+            print(f"[DEBUG] Completed trial for loss={loss}%, iter={i}. Pausing before next trial...")
+            time.sleep(3)
 
 
 def experiment_asymmetric_flows(exp_out, num_iterations=1):
     for delay_c2 in range(5, 26, 5):  
         for i in range(num_iterations):
             run_trial(exp_out, bw=100, delay_c2_ms=delay_c2,iteration=i,buffer_size=420)
+            # ADDITION: Extra delay between different delay experiments
+            print(f"[DEBUG] Completed trial for delay_c2={delay_c2}ms, iter={i}. Pausing before next trial...")
+            time.sleep(3)
 
 
 
@@ -321,6 +348,12 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
     if not os.path.exists(logs_dir):
         os.makedirs(logs_dir)
         print(f"[DEBUG] Created logs directory: {logs_dir}")
+    
+    # Create plots directory if it doesn't exist
+    plots_dir = 'plots'
+    if not os.path.exists(plots_dir):
+        os.makedirs(plots_dir)
+        print(f"[DEBUG] Created plots directory: {plots_dir}")
 
     # prefixes used by the client 
     pref_c1 = "1"
@@ -360,8 +393,12 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
     s1_log = f"{logs_dir}/s1_server_udp_bw{bw}_loss{loss}_udpmean{udp_off_mean}_iter{iteration}.log"
     s2_log = f"{logs_dir}/s2_server_udp_bw{bw}_loss{loss}_udpmean{udp_off_mean}_iter{iteration}.log"
     
-    s1_pid_raw = s1.cmd(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} > {s1_log} 2>&1 & echo $!'").strip()
-    s2_pid_raw = s2.cmd(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} > {s2_log} 2>&1 & echo $!'").strip()
+    # Define output prefixes for plots
+    s1_plot_prefix = f"{plots_dir}/s1_udp_bw{bw}_loss{loss}_udpmean{udp_off_mean}_iter{iteration}"
+    s2_plot_prefix = f"{plots_dir}/s2_udp_bw{bw}_loss{loss}_udpmean{udp_off_mean}_iter{iteration}"
+    
+    s1_pid_raw = s1.cmd(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} {s1_plot_prefix} > {s1_log} 2>&1 & echo $!'").strip()
+    s2_pid_raw = s2.cmd(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} {s2_plot_prefix} > {s2_log} 2>&1 & echo $!'").strip()
     s1_pid = s1_pid_raw.split()[0] if s1_pid_raw else None
     s2_pid = s2_pid_raw.split()[0] if s2_pid_raw else None
     print(f"started TCP servers s1 pid: {s1_pid} (log: {s1_log}), s2 pid: {s2_pid} (log: {s2_log})")
@@ -446,6 +483,10 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
 
     # Stop the network
     net.stop()
+    
+    # ADDITION: Wait for plots to be generated and saved
+    print("[DEBUG] Waiting for plots to be generated and saved...")
+    time.sleep(3)  # Give servers time to finish plot generation
 
     # compute durations
     dur_c1 = max(end_time_c1 - start_time_c1, 1e-9)
@@ -485,6 +526,15 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
     output_handle.flush()
 
     print(f"dur1={dur_c1:.3f}s dur2={dur_c2:.3f}s size1={size1} size2={size2} thr1={thr1_mbps:.3f} thr2={thr2_mbps:.3f} link_util={link_util:.3f} jfi={jfi:.3f}")
+    print(f"[DEBUG] TCP Server logs: {s1_log}, {s2_log}")
+    print(f"[DEBUG] UDP Server log: {s3_log}")
+    print(f"[DEBUG] TCP Client logs: {c1_log}, {c2_log}")
+    print(f"[DEBUG] UDP Client log: {c3_log}")
+    print(f"[DEBUG] TCP Server plots: {s1_plot_prefix}_analysis.png, {s2_plot_prefix}_analysis.png")
+    
+    # ADDITION: Additional delay between trials for cleanup
+    print("[DEBUG] Trial complete. Waiting before next trial...")
+    time.sleep(2)
 
 
 def experiment_background_udp(exp_out, num_iterations=1):
@@ -495,6 +545,9 @@ def experiment_background_udp(exp_out, num_iterations=1):
         print(f"[background_udp] Testing with UDP OFF mean={udp_off_mean}s")
         for i in range(num_iterations):
             run_trial_with_udp(exp_out, bw=100, udp_off_mean=udp_off_mean, iteration=i,buffer_size=420)
+            # ADDITION: Extra delay between different UDP experiments
+            print(f"[DEBUG] Completed UDP trial for udp_off_mean={udp_off_mean}s, iter={i}. Pausing before next trial...")
+            time.sleep(3)
 
 
 def run():

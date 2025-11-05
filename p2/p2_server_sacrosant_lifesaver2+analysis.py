@@ -194,10 +194,10 @@ class CubicCongestionControl:
                 # LOGGING ADDITION: Print epoch start without fast convergence
                 print(f"[CUBIC_EPOCH] New epoch started | K={self.k:.3f}s, origin={self.origin_point:.2f}, cwnd={self.cwnd:.2f}")
             
-            self.tcp_cwnd = self.cwnd
+        self.tcp_cwnd = self.cwnd
         
         # Time since epoch start (in seconds)
-        t = current_time - self.epoch_start
+        t = current_time + rtt_estimator.srtt - self.epoch_start
         
         # CUBIC function: W_cubic(t) = C * (t - K)^3 + W_max
         target = self.origin_point + CUBIC_C * math.pow(t - self.k, 3)
@@ -210,7 +210,7 @@ class CubicCongestionControl:
         if CUBIC_TCP_FRIENDLINESS:
             # Estimate what TCP Reno would do (AIMD: +1 MSS per RTT)
             # tcp_cwnd += 1 per RTT = 1 / cwnd per ACK
-            self.tcp_cwnd += (1.0 / self.cwnd)
+            self.tcp_cwnd += 1.0
             
             # Use TCP cwnd if it's larger (be fair to TCP flows)
             if self.tcp_cwnd > target:
@@ -247,7 +247,7 @@ class CubicCongestionControl:
             # Save w_max before reduction
             if self.cwnd < self.w_max and CUBIC_FAST_CONVERGENCE:
                 # Fast convergence: reduce w_max
-                self.w_max = self.cwnd * (2.0 - CUBIC_BETA) / 2.0
+                self.w_max = self.cwnd
             else:
                 self.w_max = self.cwnd
             
@@ -275,7 +275,7 @@ class CubicCongestionControl:
             # Save w_max before reduction
             if self.cwnd < self.w_max and CUBIC_FAST_CONVERGENCE:
                 # Fast convergence
-                self.w_max = self.cwnd * (2.0 - CUBIC_BETA) / 2.0
+                self.w_max = self.cwnd
             else:
                 self.w_max = self.cwnd
             
@@ -649,28 +649,33 @@ def generate_plots(output_prefix="p2_server"):
     print(f"[PLOTTING] Saved plot to {plot_filename}")
     plt.close()
     
-    # Also save raw data to CSV for external analysis
-    csv_filename = f"{output_prefix}_cwnd_log.csv"
-    with open(csv_filename, 'w') as f:
-        f.write("time_sec,cwnd_mss,cwnd_bytes,phase,event\n")
-        for t, c, ph, evt in cwnd_log:
-            f.write(f"{t-transfer_start_time:.6f},{c:.2f},{c*MSS_BYTES:.0f},{ph},{evt}\n")
-    print(f"[PLOTTING] Saved cwnd data to {csv_filename}")
+    # # Also save raw data to CSV for external analysis
+    # csv_filename = f"{output_prefix}_cwnd_log.csv"
+    # with open(csv_filename, 'w') as f:
+    #     f.write("time_sec,cwnd_mss,cwnd_bytes,phase,event\n")
+    #     for t, c, ph, evt in cwnd_log:
+    #         f.write(f"{t-transfer_start_time:.6f},{c:.2f},{c*MSS_BYTES:.0f},{ph},{evt}\n")
+    # print(f"[PLOTTING] Saved cwnd data to {csv_filename}")
     
-    if rtt_log:
-        rtt_csv = f"{output_prefix}_rtt_log.csv"
-        with open(rtt_csv, 'w') as f:
-            f.write("time_sec,rtt_ms\n")
-            for t, r in rtt_log:
-                f.write(f"{t-transfer_start_time:.6f},{r:.3f}\n")
-        print(f"[PLOTTING] Saved RTT data to {rtt_csv}")
+    # if rtt_log:
+    #     rtt_csv = f"{output_prefix}_rtt_log.csv"
+    #     with open(rtt_csv, 'w') as f:
+    #         f.write("time_sec,rtt_ms\n")
+    #         for t, r in rtt_log:
+    #             f.write(f"{t-transfer_start_time:.6f},{r:.3f}\n")
+    #     print(f"[PLOTTING] Saved RTT data to {rtt_csv}")
 
 # ============================================================================
 
-def run_server(server_ip, server_port):
+def run_server(server_ip, server_port, output_prefix="p2_server"):
     """
     PART 2 MODIFICATION: Main server logic with CUBIC congestion control.
     Removed SWS parameter - now using dynamic cwnd from CUBIC.
+    
+    Args:
+        server_ip: Server IP address
+        server_port: Server port number
+        output_prefix: Prefix for output files (plots and logs)
     """
     global file_data, file_size, next_seq, base_seq, client_addr, transfer_complete, sock, cubic_cc
     global transfer_start_time  # LOGGING ADDITION
@@ -803,15 +808,16 @@ def run_server(server_ip, server_port):
     print("="*80 + "\n")
     
     # LOGGING ADDITION: Generate plots
-    generate_plots(output_prefix="p2_server")
+    generate_plots(output_prefix=output_prefix)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python3 p2_server.py <SERVER_IP> <SERVER_PORT>")
+    if len(sys.argv) < 3:
+        print("Usage: python3 p2_server.py <SERVER_IP> <SERVER_PORT> [OUTPUT_PREFIX]")
         sys.exit(1)
     
     SERVER_IP = sys.argv[1]
     SERVER_PORT = int(sys.argv[2])
+    OUTPUT_PREFIX = sys.argv[3] if len(sys.argv) > 3 else "p2_server"
     
-    run_server(SERVER_IP, SERVER_PORT)
+    run_server(SERVER_IP, SERVER_PORT, OUTPUT_PREFIX)
