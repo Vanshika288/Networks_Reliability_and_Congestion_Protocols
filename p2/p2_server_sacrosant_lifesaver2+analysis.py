@@ -17,11 +17,12 @@ PACKET_FORMAT = '!IIII4s' # 4+4+4+4+4 = 20 bytes
 DATA_LEN = MAX_PAYLOAD_SIZE - HEADER_LEN # 1180 bytes
 EOF_MSG = b'EOF'
 FAST_RETRANSMIT_K = 2
+RTO_MULTIPLIER = 2
 
 # ============================================================================
 # PART 2: TCP CUBIC CONGESTION CONTROL HYPERPARAMETERS
 # ============================================================================
-CUBIC_C = 0.8                    # CUBIC scaling constant
+CUBIC_C = 1000                    # CUBIC scaling constant
 CUBIC_BETA = 0.7                 # Multiplicative decrease factor (0.7 = 30% reduction)
 INITIAL_CWND_MSS = 1             # Initial congestion window (in MSS units)
 INITIAL_SSTHRESH_MSS = 200       # Initial slow start threshold (in MSS units)
@@ -47,7 +48,7 @@ inflight_log = []  # List of (timestamp, bytes_in_flight)
 
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.2, max_rto=60.0):
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.02, max_rto=60.0):
         self.alpha = alpha
         self.beta = beta
         self.srtt = 0.0
@@ -68,7 +69,7 @@ class RTOEstimator:
             self.rttvar = (1 - self.beta) * self.rttvar + self.beta * delta
             self.srtt = (1 - self.alpha) * self.srtt + self.alpha * sample_rtt
         
-        self.rto = max(self.min_rto, min(self.srtt + 4 * self.rttvar, self.max_rto))
+        self.rto = max(self.min_rto, min(RTO_MULTIPLIER*self.srtt + 4 * self.rttvar, self.max_rto))
         
         # LOGGING ADDITION: Print RTO updates
         print(f"[RTO_UPDATE] SRTT={self.srtt*1000:.2f}ms, RTTVAR={self.rttvar*1000:.2f}ms, RTO={self.rto:.3f}s")
