@@ -22,17 +22,20 @@ RTO_MULTIPLIER = 2
 # ============================================================================
 # PART 2: TCP CUBIC CONGESTION CONTROL HYPERPARAMETERS
 # ============================================================================
-CUBIC_C = 1000                    # CUBIC scaling constant
+CUBIC_C = 1000                   # CUBIC scaling constant
 CUBIC_BETA = 0.7                 # Multiplicative decrease factor (0.7 = 30% reduction)
 INITIAL_CWND_MSS = 1             # Initial congestion window (in MSS units)
 INITIAL_SSTHRESH_MSS = 200       # Initial slow start threshold (in MSS units)
 MIN_CWND_MSS = 1                 # Minimum congestion window
 MAX_CWND_MSS = 50000               # Maximum congestion window (safety limit)
 MSS_BYTES = DATA_LEN             # Maximum Segment Size = 1180 bytes
+FAST_RETRANSMIT_BETA = 0.9
 
 # CUBIC parameters
 CUBIC_FAST_CONVERGENCE = True    # Enable fast convergence mode
 CUBIC_TCP_FRIENDLINESS = True    # Enable TCP-friendliness mode
+
+PACKET_CAP_TIMEOUT = 3
 
 # ============================================================================
 
@@ -281,7 +284,7 @@ class CubicCongestionControl:
                 self.w_max = self.cwnd
             
             # Reduce cwnd by (1 - beta)
-            self.cwnd = max(self.cwnd * CUBIC_BETA, MIN_CWND_MSS)
+            self.cwnd = max(self.cwnd * FAST_RETRANSMIT_BETA, MIN_CWND_MSS)
             self.ssthresh = self.cwnd
             
             # Reset epoch
@@ -745,6 +748,9 @@ def run_server(server_ip, server_port, output_prefix="p2_server"):
                 if current_time - send_time > current_packet_rto:
                     packets_to_retransmit.append(seq)
             
+            if len(packets_to_retransmit) > PACKET_CAP_TIMEOUT:
+                cubic_cc.on_loss_event('timeout')
+            
             for seq in packets_to_retransmit:
                 if seq in in_flight_packets:
                     print(f"\n[TIMEOUT] *** Packet timeout detected *** seq={seq}, RTO={current_packet_rto:.2f}s")
@@ -752,7 +758,7 @@ def run_server(server_ip, server_port, output_prefix="p2_server"):
                     stats["timeouts"] += 1
                     
                     # PART 2 ADDITION: Notify CUBIC of timeout (severe congestion)
-                    cubic_cc.on_loss_event('timeout')
+                    # cubic_cc.on_loss_event('timeout')
                     
                     old_packet, _st, retrans_count = in_flight_packets[seq]
                     data_chunk = old_packet[HEADER_LEN:]
