@@ -19,23 +19,27 @@ EOF_MSG = b'EOF'
 FAST_RETRANSMIT_K = 2
 RTO_MULTIPLIER = 2
 
+
 # ============================================================================
 # PART 2: TCP CUBIC CONGESTION CONTROL HYPERPARAMETERS
 # ============================================================================
-CUBIC_C = 1000                   # CUBIC scaling constant
+CUBIC_C = 100                   # CUBIC scaling constant
 CUBIC_BETA = 0.7                 # Multiplicative decrease factor (0.7 = 30% reduction)
 INITIAL_CWND_MSS = 1             # Initial congestion window (in MSS units)
-INITIAL_SSTHRESH_MSS = 200       # Initial slow start threshold (in MSS units)
+INITIAL_SSTHRESH_MSS = 250       # Initial slow start threshold (in MSS units)
 MIN_CWND_MSS = 1                 # Minimum congestion window
 MAX_CWND_MSS = 50000               # Maximum congestion window (safety limit)
 MSS_BYTES = DATA_LEN             # Maximum Segment Size = 1180 bytes
 FAST_RETRANSMIT_BETA = 0.9
+INITIAL_W_MAX = INITIAL_SSTHRESH_MSS * 0.0
 
 # CUBIC parameters
 CUBIC_FAST_CONVERGENCE = True    # Enable fast convergence mode
 CUBIC_TCP_FRIENDLINESS = True    # Enable TCP-friendliness mode
 
 PACKET_CAP_TIMEOUT = 3
+EXPONENTIAL_INC = 1
+TIMEOUT_CWND_MULT = 0.5
 
 # ============================================================================
 
@@ -95,7 +99,7 @@ class CubicCongestionControl:
         self.ssthresh = float(INITIAL_SSTHRESH_MSS)
         
         # CUBIC-specific state
-        self.w_max = 0.0              # Window size before last reduction
+        self.w_max = INITIAL_W_MAX             # Window size before last reduction
         self.k = 0.0                  # Time period for cwnd to grow to w_max
         self.epoch_start = 0.0        # Time when current epoch started
         self.origin_point = 0.0       # Origin point of cubic function
@@ -144,7 +148,7 @@ class CubicCongestionControl:
         if self.cwnd < self.ssthresh:
             # === SLOW START PHASE ===
             # Exponential growth: increase by 1 MSS for each ACK
-            self.cwnd += acked_mss
+            self.cwnd += EXPONENTIAL_INC * acked_mss
             
             # LOGGING ADDITION: Print slow start growth
             if self.cwnd != old_cwnd:
@@ -255,7 +259,7 @@ class CubicCongestionControl:
             else:
                 self.w_max = self.cwnd
             
-            self.cwnd = float(INITIAL_CWND_MSS)
+            self.cwnd = self.cwnd * TIMEOUT_CWND_MULT
             self.epoch_start = 0.0
             
             # LOGGING ADDITION: Detailed timeout event logging
