@@ -246,11 +246,6 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
 
     # Stop the network
     net.stop()
-    
-    # ADDITION: Wait for plots to be generated and saved
-    print("[DEBUG] Waiting for plots to be generated and saved...")
-    time.sleep(3)  # Give servers time to finish plot generation
-
     # compute durations
     dur_c1 = max(end_time_c1 - start_time_c1, 1e-9)
     dur_c2 = max(end_time_c2 - start_time_c2, 1e-9)
@@ -294,10 +289,6 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     print(f"[DEBUG] Server logs: {s1_log}, {s2_log}")
     print(f"[DEBUG] Client logs: {c1_log}, {c2_log}")
     print(f"[DEBUG] Server plots: {s1_plot_prefix}_analysis.png, {s2_plot_prefix}_analysis.png")
-    
-    # ADDITION: Additional delay between trials for cleanup
-    print("[DEBUG] Trial complete. Waiting before next trial...")
-    time.sleep(2)
 
 
 def experiment_fixed_bandwidth(exp_out, num_iterations=1):
@@ -312,30 +303,17 @@ def experiment_fixed_bandwidth(exp_out, num_iterations=1):
         print(f"[fixed_bw] bw={bw}Mbps -> buffer_size={buf_packets} packets (RTT={RTT_MS}ms)")
         for i in range(num_iterations):
             run_trial(exp_out, bw=bw,  iteration=i, buffer_size=buf_packets)
-            # ADDITION: Extra delay between different bandwidth experiments
-            print(f"[DEBUG] Completed trial for bw={bw}Mbps, iter={i}. Pausing before next trial...")
-            time.sleep(4)
-
 
 def experiment_varying_loss(exp_out, num_iterations=1):
     loss_rates = [0.0, 0.5, 1.0, 1.5, 2.0]
     for loss in loss_rates:
         for i in range(num_iterations):
             run_trial(exp_out, bw=100, loss=loss, iteration=i,buffer_size=420)
-            # ADDITION: Extra delay between different loss rate experiments
-            print(f"[DEBUG] Completed trial for loss={loss}%, iter={i}. Pausing before next trial...")
-            time.sleep(3)
-
 
 def experiment_asymmetric_flows(exp_out, num_iterations=1):
     for delay_c2 in range(5, 26, 5):  
         for i in range(num_iterations):
             run_trial(exp_out, bw=100, delay_c2_ms=delay_c2,iteration=i,buffer_size=420)
-            # ADDITION: Extra delay between different delay experiments
-            print(f"[DEBUG] Completed trial for delay_c2={delay_c2}ms, iter={i}. Pausing before next trial...")
-            time.sleep(3)
-
-
 
 def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=1.0, iteration=0, buffer_size=420):
     setLogLevel('info')
@@ -483,10 +461,6 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
 
     # Stop the network
     net.stop()
-    
-    # ADDITION: Wait for plots to be generated and saved
-    print("[DEBUG] Waiting for plots to be generated and saved...")
-    time.sleep(3)  # Give servers time to finish plot generation
 
     # compute durations
     dur_c1 = max(end_time_c1 - start_time_c1, 1e-9)
@@ -531,10 +505,6 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
     print(f"[DEBUG] TCP Client logs: {c1_log}, {c2_log}")
     print(f"[DEBUG] UDP Client log: {c3_log}")
     print(f"[DEBUG] TCP Server plots: {s1_plot_prefix}_analysis.png, {s2_plot_prefix}_analysis.png")
-    
-    # ADDITION: Additional delay between trials for cleanup
-    print("[DEBUG] Trial complete. Waiting before next trial...")
-    time.sleep(2)
 
 
 def experiment_background_udp(exp_out, num_iterations=1):
@@ -545,10 +515,6 @@ def experiment_background_udp(exp_out, num_iterations=1):
         print(f"[background_udp] Testing with UDP OFF mean={udp_off_mean}s")
         for i in range(num_iterations):
             run_trial_with_udp(exp_out, bw=100, udp_off_mean=udp_off_mean, iteration=i,buffer_size=420)
-            # ADDITION: Extra delay between different UDP experiments
-            print(f"[DEBUG] Completed UDP trial for udp_off_mean={udp_off_mean}s, iter={i}. Pausing before next trial...")
-            time.sleep(3)
-
 
 def run():
     if len(sys.argv) < 2:

@@ -781,6 +781,10 @@ def run_server(server_ip, server_port, output_prefix="p2_server"):
         sock.sendto(eof_packet, client_addr)
         time.sleep(0.01)
 
+    # LOGGING ADDITION: Generate plots
+    generate_plots(output_prefix=output_prefix)
+    # time.sleep(5)
+
     # --- 6. Cleanup ---
     transfer_complete = True
     receiver_thread.join()
@@ -808,8 +812,7 @@ def run_server(server_ip, server_port, output_prefix="p2_server"):
     print(f"\n{cubic_cc.get_state_str()}")
     print("="*80 + "\n")
     
-    # LOGGING ADDITION: Generate plots
-    generate_plots(output_prefix=output_prefix)
+    
 
 
 if __name__ == "__main__":
