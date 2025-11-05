@@ -4,6 +4,10 @@ import time
 import struct
 import threading
 import math
+# LOGGING ADDITION: Import matplotlib for plotting
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server environments
+import matplotlib.pyplot as plt
 
 # --- Constants ---
 MAX_PAYLOAD_SIZE = 1200
@@ -31,6 +35,16 @@ CUBIC_TCP_FRIENDLINESS = True    # Enable TCP-friendliness mode
 
 # ============================================================================
 
+# ============================================================================
+# LOGGING ADDITION: Global data structures for tracking cwnd evolution
+# ============================================================================
+cwnd_log = []  # List of (timestamp, cwnd_mss, phase, event_type)
+# event_type can be: 'normal', 'timeout', 'fast_retransmit', 'slow_start_exit'
+rtt_log = []   # List of (timestamp, rtt_ms)
+throughput_log = []  # List of (timestamp, throughput_mbps)
+inflight_log = []  # List of (timestamp, bytes_in_flight)
+# ============================================================================
+
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
     def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.2, max_rto=60.0):
@@ -55,6 +69,9 @@ class RTOEstimator:
             self.srtt = (1 - self.alpha) * self.srtt + self.alpha * sample_rtt
         
         self.rto = max(self.min_rto, min(self.srtt + 4 * self.rttvar, self.max_rto))
+        
+        # LOGGING ADDITION: Print RTO updates
+        print(f"[RTO_UPDATE] SRTT={self.srtt*1000:.2f}ms, RTTVAR={self.rttvar*1000:.2f}ms, RTO={self.rto:.3f}s")
 
     def get_rto(self):
         return self.rto
@@ -84,13 +101,20 @@ class CubicCongestionControl:
         self.min_rtt = float('inf')
         self.current_rtt = 1.0        # Default 1 second
         
-        print(f"[CUBIC] Initialized: cwnd={self.cwnd:.2f} MSS, ssthresh={self.ssthresh:.2f} MSS")
+        # LOGGING ADDITION: Track last cwnd value for change detection
+        self.last_cwnd = self.cwnd
+        
+        print(f"[CUBIC_INIT] cwnd={self.cwnd:.2f} MSS, ssthresh={self.ssthresh:.2f} MSS")
+        print(f"[CUBIC_INIT] CUBIC_C={CUBIC_C}, CUBIC_BETA={CUBIC_BETA}")
+        print(f"[CUBIC_INIT] Fast Convergence: {CUBIC_FAST_CONVERGENCE}, TCP Friendliness: {CUBIC_TCP_FRIENDLINESS}")
     
     def update_rtt(self, rtt_sample):
         """Update RTT estimates for CUBIC calculations"""
         self.current_rtt = rtt_sample
         if rtt_sample < self.min_rtt:
             self.min_rtt = rtt_sample
+            # LOGGING ADDITION: Print when min RTT is updated
+            print(f"[RTT_UPDATE] New min_rtt={self.min_rtt*1000:.2f}ms, current_rtt={self.current_rtt*1000:.2f}ms")
     
     def get_cwnd_bytes(self):
         """Return current congestion window in bytes"""
@@ -109,20 +133,44 @@ class CubicCongestionControl:
         # Convert bytes to MSS units
         acked_mss = bytes_acked / float(MSS_BYTES)
         
+        # LOGGING ADDITION: Store old cwnd to detect changes
+        old_cwnd = self.cwnd
+        phase_before = "SLOW_START" if self.cwnd < self.ssthresh else "CONGESTION_AVOIDANCE"
+        
         if self.cwnd < self.ssthresh:
             # === SLOW START PHASE ===
             # Exponential growth: increase by 1 MSS for each ACK
             self.cwnd += acked_mss
+            
+            # LOGGING ADDITION: Print slow start growth
+            if self.cwnd != old_cwnd:
+                print(f"[SLOW_START] ACK for {bytes_acked} bytes ({acked_mss:.2f} MSS) | cwnd: {old_cwnd:.2f} -> {self.cwnd:.2f} MSS ({self.get_cwnd_bytes()} bytes) | ssthresh: {self.ssthresh:.2f} MSS")
+            
             if self.cwnd >= self.ssthresh:
-                print(f"[CUBIC] Exiting slow start: cwnd={self.cwnd:.2f} MSS >= ssthresh={self.ssthresh:.2f} MSS")
+                print(f"[PHASE_CHANGE] *** EXITING SLOW START *** cwnd={self.cwnd:.2f} MSS >= ssthresh={self.ssthresh:.2f} MSS")
+                print(f"[PHASE_CHANGE] *** ENTERING CONGESTION AVOIDANCE ***")
+                # LOGGING ADDITION: Record phase change event
+                cwnd_log.append((time.time(), self.cwnd, "SLOW_START_EXIT", "slow_start_exit"))
         else:
             # === CONGESTION AVOIDANCE PHASE ===
             # Use CUBIC function for window growth
             self._cubic_update(current_time)
+            
+            # LOGGING ADDITION: Print congestion avoidance growth
+            if self.cwnd != old_cwnd:
+                change = self.cwnd - old_cwnd
+                print(f"[CONG_AVOID] cwnd: {old_cwnd:.2f} -> {self.cwnd:.2f} MSS (Δ={change:.4f}) ({self.get_cwnd_bytes()} bytes) | w_max={self.w_max:.2f}, tcp_cwnd={self.tcp_cwnd:.2f}")
         
         # Cap cwnd at maximum
         if self.cwnd > MAX_CWND_MSS:
+            # LOGGING ADDITION: Warn if hitting max
+            if old_cwnd <= MAX_CWND_MSS:
+                print(f"[WARNING] cwnd capped at MAX_CWND_MSS={MAX_CWND_MSS}")
             self.cwnd = MAX_CWND_MSS
+        
+        # LOGGING ADDITION: Record cwnd change
+        phase = "SLOW_START" if self.cwnd < self.ssthresh else "CONGESTION_AVOIDANCE"
+        cwnd_log.append((time.time(), self.cwnd, phase, "normal"))
         
         return self.get_cwnd_bytes()
     
@@ -138,9 +186,13 @@ class CubicCongestionControl:
                 # Fast convergence
                 self.k = math.pow((self.w_max - self.cwnd) / CUBIC_C, 1.0/3.0)
                 self.origin_point = self.w_max
+                # LOGGING ADDITION: Print epoch start with fast convergence
+                print(f"[CUBIC_EPOCH] New epoch started | K={self.k:.3f}s, origin={self.origin_point:.2f}, w_max={self.w_max:.2f} (Fast Convergence)")
             else:
                 self.k = 0.0
                 self.origin_point = self.cwnd
+                # LOGGING ADDITION: Print epoch start without fast convergence
+                print(f"[CUBIC_EPOCH] New epoch started | K={self.k:.3f}s, origin={self.origin_point:.2f}, cwnd={self.cwnd:.2f}")
             
             self.tcp_cwnd = self.cwnd
         
@@ -149,6 +201,10 @@ class CubicCongestionControl:
         
         # CUBIC function: W_cubic(t) = C * (t - K)^3 + W_max
         target = self.origin_point + CUBIC_C * math.pow(t - self.k, 3)
+        
+        # LOGGING ADDITION: Store for comparison
+        cubic_target = target
+        tcp_target = self.tcp_cwnd
         
         # === TCP-FRIENDLINESS CHECK ===
         if CUBIC_TCP_FRIENDLINESS:
@@ -159,6 +215,9 @@ class CubicCongestionControl:
             # Use TCP cwnd if it's larger (be fair to TCP flows)
             if self.tcp_cwnd > target:
                 target = self.tcp_cwnd
+                # LOGGING ADDITION: Print when TCP-friendliness is active
+                if abs(self.tcp_cwnd - cubic_target) > 0.1:
+                    print(f"[TCP_FRIENDLY] Using TCP target: tcp_cwnd={self.tcp_cwnd:.2f} > cubic_target={cubic_target:.2f} (t={t:.3f}s)")
         
         # Calculate increment based on RTT
         if target > self.cwnd:
@@ -179,7 +238,10 @@ class CubicCongestionControl:
         """
         if loss_type == 'timeout':
             # Severe congestion: reset to slow start
-            print(f"[CUBIC] TIMEOUT: cwnd={self.cwnd:.2f} -> ssthresh={self.cwnd * CUBIC_BETA:.2f}, cwnd=1 MSS")
+            old_cwnd = self.cwnd
+            old_ssthresh = self.ssthresh
+            old_w_max = self.w_max
+            
             self.ssthresh = max(self.cwnd * CUBIC_BETA, MIN_CWND_MSS)
             
             # Save w_max before reduction
@@ -192,9 +254,23 @@ class CubicCongestionControl:
             self.cwnd = float(INITIAL_CWND_MSS)
             self.epoch_start = 0.0
             
+            # LOGGING ADDITION: Detailed timeout event logging
+            print(f"\n{'='*80}")
+            print(f"[TIMEOUT_EVENT] *** SEVERE CONGESTION DETECTED ***")
+            print(f"[TIMEOUT_EVENT] cwnd: {old_cwnd:.2f} -> {self.cwnd:.2f} MSS ({old_cwnd*MSS_BYTES} -> {self.get_cwnd_bytes()} bytes)")
+            print(f"[TIMEOUT_EVENT] ssthresh: {old_ssthresh:.2f} -> {self.ssthresh:.2f} MSS")
+            print(f"[TIMEOUT_EVENT] w_max: {old_w_max:.2f} -> {self.w_max:.2f} MSS")
+            print(f"[TIMEOUT_EVENT] RESETTING TO SLOW START")
+            print(f"{'='*80}\n")
+            
+            # LOGGING ADDITION: Record timeout event
+            cwnd_log.append((time.time(), self.cwnd, "SLOW_START", "timeout"))
+            
         elif loss_type == 'fast_retransmit':
             # Mild congestion: multiplicative decrease
             old_cwnd = self.cwnd
+            old_ssthresh = self.ssthresh
+            old_w_max = self.w_max
             
             # Save w_max before reduction
             if self.cwnd < self.w_max and CUBIC_FAST_CONVERGENCE:
@@ -210,12 +286,22 @@ class CubicCongestionControl:
             # Reset epoch
             self.epoch_start = 0.0
             
-            print(f"[CUBIC] FAST_RETRANSMIT: cwnd={old_cwnd:.2f} -> {self.cwnd:.2f} MSS (beta={CUBIC_BETA}), w_max={self.w_max:.2f}")
+            # LOGGING ADDITION: Detailed fast retransmit event logging
+            print(f"\n{'='*80}")
+            print(f"[FAST_RETX_EVENT] *** MILD CONGESTION DETECTED (3 DUP ACKs) ***")
+            print(f"[FAST_RETX_EVENT] cwnd: {old_cwnd:.2f} -> {self.cwnd:.2f} MSS (×{CUBIC_BETA}) ({old_cwnd*MSS_BYTES} -> {self.get_cwnd_bytes()} bytes)")
+            print(f"[FAST_RETX_EVENT] ssthresh: {old_ssthresh:.2f} -> {self.ssthresh:.2f} MSS")
+            print(f"[FAST_RETX_EVENT] w_max: {old_w_max:.2f} -> {self.w_max:.2f} MSS")
+            print(f"[FAST_RETX_EVENT] ENTERING CONGESTION AVOIDANCE")
+            print(f"{'='*80}\n")
+            
+            # LOGGING ADDITION: Record fast retransmit event
+            cwnd_log.append((time.time(), self.cwnd, "CONGESTION_AVOIDANCE", "fast_retransmit"))
     
     def get_state_str(self):
         """Return string representation of current state for logging"""
         phase = "SLOW_START" if self.cwnd < self.ssthresh else "CONGESTION_AVOIDANCE"
-        return f"[CUBIC] cwnd={self.cwnd:.2f} MSS ({self.get_cwnd_bytes()} bytes), ssthresh={self.ssthresh:.2f} MSS, w_max={self.w_max:.2f}, phase={phase}"
+        return f"[CUBIC_STATE] cwnd={self.cwnd:.2f} MSS ({self.get_cwnd_bytes()} bytes), ssthresh={self.ssthresh:.2f} MSS, w_max={self.w_max:.2f}, phase={phase}"
 
 # ============================================================================
 
@@ -232,6 +318,9 @@ file_size = 0
 client_addr = None
 transfer_complete = False
 state_lock = threading.RLock()
+
+# LOGGING ADDITION: Track transfer start time globally
+transfer_start_time = 0.0
 
 # --- Statistics ---
 stats = {
@@ -262,6 +351,9 @@ def try_send_next_packets(sock):
     cwnd_bytes = cubic_cc.get_cwnd_bytes()
     in_flight_bytes = sum(len(pkt[0]) - HEADER_LEN for pkt in in_flight_packets.values())
     
+    # LOGGING ADDITION: Track packets sent in this burst
+    packets_sent_this_call = 0
+    
     # Send packets while we have room in the congestion window
     while in_flight_bytes < cwnd_bytes and next_seq < file_size:
         # Determine how much data to send
@@ -280,11 +372,18 @@ def try_send_next_packets(sock):
             sock.sendto(packet, client_addr)
             in_flight_packets[next_seq] = (packet, time.time(), 0)
             stats["packets_sent"] += 1
+            packets_sent_this_call += 1
             next_seq += data_chunk_size
             in_flight_bytes += data_chunk_size
         except Exception as e:
-            print(f"Error sending packet at seq {next_seq}: {e}")
+            print(f"[ERROR] Failed to send packet at seq {next_seq}: {e}")
             break
+    
+    # LOGGING ADDITION: Print send burst info if packets were sent
+    if packets_sent_this_call > 0:
+        print(f"[SEND_BURST] Sent {packets_sent_this_call} packets | In-flight: {len(in_flight_packets)} pkts ({in_flight_bytes} bytes) | cwnd: {cwnd_bytes} bytes")
+        # Record in-flight bytes
+        inflight_log.append((time.time(), in_flight_bytes))
 
 def process_ack(ack_packet):
     """
@@ -296,11 +395,14 @@ def process_ack(ack_packet):
         # Unpack ACK: Cum_ACK (I), TS_Echo (I), SACK_Start (I), SACK_End (I)
         cum_ack, ts_echo, sack_start, sack_end, _ = struct.unpack(PACKET_FORMAT, ack_packet)
     except struct.error:
-        print("Received malformed ACK.")
+        print("[ERROR] Received malformed ACK.")
         return
 
     with state_lock:
         stats["acks_received"] += 1
+        
+        # LOGGING ADDITION: Track ACK details
+        ack_time = time.time()
         
         was_base_retransmitted = False
         if base_seq in in_flight_packets:
@@ -320,6 +422,10 @@ def process_ack(ack_packet):
             sack_keys = [seq for seq in list(in_flight_packets.keys())
                         if seq in sacked_packets]
             
+            # LOGGING ADDITION: Print SACK details
+            if sack_keys:
+                print(f"[SACK] Received SACK for {len(sack_keys)} packets: seqs={sack_keys[:5]}{'...' if len(sack_keys) > 5 else ''}")
+            
             for seq in sack_keys:
                 packet, send_time, retrans_count = in_flight_packets.pop(seq)
 
@@ -332,9 +438,13 @@ def process_ack(ack_packet):
                 sample_rtt_sec = sample_rtt_ms / 1000.0
                 rtt_estimator.update(sample_rtt_sec)
                 cubic_cc.update_rtt(sample_rtt_sec)
+                
+                # LOGGING ADDITION: Record RTT sample
+                rtt_log.append((ack_time, sample_rtt_ms))
             
             # Calculate bytes newly acknowledged
             bytes_newly_acked = cum_ack - base_seq
+            old_base = base_seq
             base_seq = cum_ack
             dup_ack_counts.clear()
             
@@ -342,6 +452,10 @@ def process_ack(ack_packet):
             acked_keys = [seq for seq in in_flight_packets if seq < cum_ack]
             for seq in acked_keys:
                 in_flight_packets.pop(seq)
+            
+            # LOGGING ADDITION: Print ACK details
+            progress_pct = (base_seq / file_size * 100) if file_size > 0 else 0
+            print(f"[ACK] Cum ACK for {bytes_newly_acked} bytes | base_seq: {old_base} -> {base_seq} | Progress: {progress_pct:.1f}% | In-flight: {len(in_flight_packets)} pkts")
             
             # PART 2 ADDITION: Update CUBIC on successful ACK
             stats["bytes_acked"] += bytes_newly_acked
@@ -351,11 +465,15 @@ def process_ack(ack_packet):
             # --- 3. Process Duplicate ACK ---
             dup_ack_counts[cum_ack] = dup_ack_counts.get(cum_ack, 0) + 1
             
+            # LOGGING ADDITION: Print duplicate ACK info
+            dup_count = dup_ack_counts[cum_ack]
+            print(f"[DUP_ACK] Duplicate ACK #{dup_count} for seq={cum_ack}")
+            
             # Fast Retransmit Trigger
             if base_seq in in_flight_packets:
                 old_packet, _, retrans_count = in_flight_packets[base_seq]
                 if dup_ack_counts[cum_ack] == 3 + FAST_RETRANSMIT_K * retrans_count:
-                    print(f"--- FAST RETRANSMIT for seq {base_seq} ---")
+                    print(f"\n[FAST_RETRANSMIT] *** Triggered at {dup_ack_counts[cum_ack]} dup ACKs for seq={base_seq} ***")
                     stats["fast_retransmits"] += 1
                     stats["packets_retransmitted"] += 1
                     
@@ -385,9 +503,169 @@ def ack_receiver_thread(sock):
             continue
         except Exception as e:
             if not transfer_complete:
-                print(f"ACK receiver error: {e}")
+                print(f"[ERROR] ACK receiver error: {e}")
             break
-    print("ACK receiver thread stopping.")
+    print("[THREAD] ACK receiver thread stopping.")
+
+# ============================================================================
+# LOGGING ADDITION: Function to generate plots
+# ============================================================================
+def generate_plots(output_prefix="p2_server"):
+    """Generate visualization plots from logged data"""
+    print("\n[PLOTTING] Generating visualization plots...")
+    
+    if not cwnd_log:
+        print("[PLOTTING] No cwnd data to plot")
+        return
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(4, 1, figsize=(14, 16))
+    fig.suptitle('TCP CUBIC Congestion Control Analysis', fontsize=16, fontweight='bold')
+    
+    # --- Plot 1: CWND Evolution ---
+    ax1 = axes[0]
+    
+    # Extract data
+    times = [t - transfer_start_time for t, _, _, _ in cwnd_log]
+    cwnds = [c for _, c, _, _ in cwnd_log]
+    
+    # Plot main cwnd line
+    ax1.plot(times, cwnds, 'b-', linewidth=1.5, label='CWND', alpha=0.7)
+    
+    # Mark events
+    timeout_times = [t - transfer_start_time for t, _, _, evt in cwnd_log if evt == 'timeout']
+    timeout_cwnds = [c for _, c, _, evt in cwnd_log if evt == 'timeout']
+    
+    fast_retx_times = [t - transfer_start_time for t, _, _, evt in cwnd_log if evt == 'fast_retransmit']
+    fast_retx_cwnds = [c for _, c, _, evt in cwnd_log if evt == 'fast_retransmit']
+    
+    ss_exit_times = [t - transfer_start_time for t, _, _, evt in cwnd_log if evt == 'slow_start_exit']
+    ss_exit_cwnds = [c for _, c, _, evt in cwnd_log if evt == 'slow_start_exit']
+    
+    if timeout_times:
+        ax1.scatter(timeout_times, timeout_cwnds, color='red', s=100, marker='X', 
+                   label=f'Timeout ({len(timeout_times)})', zorder=5)
+    if fast_retx_times:
+        ax1.scatter(fast_retx_times, fast_retx_cwnds, color='orange', s=100, marker='v', 
+                   label=f'Fast Retransmit ({len(fast_retx_times)})', zorder=5)
+    if ss_exit_times:
+        ax1.scatter(ss_exit_times, ss_exit_cwnds, color='green', s=100, marker='^', 
+                   label=f'SS Exit ({len(ss_exit_times)})', zorder=5)
+    
+    # Add ssthresh line (if we can extract it)
+    ax1.axhline(y=INITIAL_SSTHRESH_MSS, color='gray', linestyle='--', 
+               linewidth=1, label=f'Initial ssthresh ({INITIAL_SSTHRESH_MSS})', alpha=0.5)
+    
+    ax1.set_xlabel('Time (seconds)', fontsize=11)
+    ax1.set_ylabel('Congestion Window (MSS)', fontsize=11)
+    ax1.set_title('CWND Evolution Over Time', fontsize=12, fontweight='bold')
+    ax1.legend(loc='best', fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    
+    # --- Plot 2: CWND in Bytes with Phase Coloring ---
+    ax2 = axes[1]
+    
+    cwnd_bytes = [c * MSS_BYTES for c in cwnds]
+    
+    # Color by phase
+    slow_start_mask = [ph == 'SLOW_START' for _, _, ph, _ in cwnd_log]
+    cong_avoid_mask = [ph == 'CONGESTION_AVOIDANCE' for _, _, ph, _ in cwnd_log]
+    
+    if any(slow_start_mask):
+        ss_times = [t for t, m in zip(times, slow_start_mask) if m]
+        ss_cwnds = [c for c, m in zip(cwnd_bytes, slow_start_mask) if m]
+        ax2.scatter(ss_times, ss_cwnds, c='lightblue', s=10, label='Slow Start', alpha=0.6)
+    
+    if any(cong_avoid_mask):
+        ca_times = [t for t, m in zip(times, cong_avoid_mask) if m]
+        ca_cwnds = [c for c, m in zip(cwnd_bytes, cong_avoid_mask) if m]
+        ax2.scatter(ca_times, ca_cwnds, c='lightcoral', s=10, label='Congestion Avoidance', alpha=0.6)
+    
+    ax2.set_xlabel('Time (seconds)', fontsize=11)
+    ax2.set_ylabel('Congestion Window (Bytes)', fontsize=11)
+    ax2.set_title('CWND (Bytes) with Phase Indication', fontsize=12, fontweight='bold')
+    ax2.legend(loc='best', fontsize=9)
+    ax2.grid(True, alpha=0.3)
+    
+    # --- Plot 3: RTT Evolution ---
+    ax3 = axes[2]
+    
+    if rtt_log:
+        rtt_times = [t - transfer_start_time for t, _ in rtt_log]
+        rtt_values = [r for _, r in rtt_log]
+        
+        ax3.plot(rtt_times, rtt_values, 'g-', linewidth=1, alpha=0.5, label='RTT samples')
+        
+        # Add moving average
+        window = min(50, len(rtt_values) // 10 + 1)
+        if len(rtt_values) >= window:
+            rtt_ma = []
+            for i in range(len(rtt_values)):
+                start = max(0, i - window // 2)
+                end = min(len(rtt_values), i + window // 2 + 1)
+                rtt_ma.append(sum(rtt_values[start:end]) / (end - start))
+            ax3.plot(rtt_times, rtt_ma, 'darkgreen', linewidth=2, label=f'Moving Avg (window={window})')
+        
+        ax3.set_xlabel('Time (seconds)', fontsize=11)
+        ax3.set_ylabel('RTT (milliseconds)', fontsize=11)
+        ax3.set_title('Round-Trip Time Evolution', fontsize=12, fontweight='bold')
+        ax3.legend(loc='best', fontsize=9)
+        ax3.grid(True, alpha=0.3)
+    else:
+        ax3.text(0.5, 0.5, 'No RTT data available', ha='center', va='center', 
+                transform=ax3.transAxes, fontsize=12)
+    
+    # --- Plot 4: In-Flight Bytes ---
+    ax4 = axes[3]
+    
+    if inflight_log:
+        if_times = [t - transfer_start_time for t, _ in inflight_log]
+        if_bytes = [b for _, b in inflight_log]
+        
+        ax4.plot(if_times, if_bytes, 'm-', linewidth=1.5, label='In-Flight Bytes', alpha=0.7)
+        
+        # Also plot cwnd for comparison
+        ax4_twin = ax4.twinx()
+        ax4_twin.plot(times, cwnd_bytes, 'b--', linewidth=1, label='CWND (bytes)', alpha=0.4)
+        ax4_twin.set_ylabel('CWND (Bytes)', fontsize=11, color='b')
+        ax4_twin.tick_params(axis='y', labelcolor='b')
+        ax4_twin.legend(loc='upper right', fontsize=9)
+        
+        ax4.set_xlabel('Time (seconds)', fontsize=11)
+        ax4.set_ylabel('In-Flight Bytes', fontsize=11, color='m')
+        ax4.set_title('In-Flight Data vs CWND', fontsize=12, fontweight='bold')
+        ax4.tick_params(axis='y', labelcolor='m')
+        ax4.legend(loc='upper left', fontsize=9)
+        ax4.grid(True, alpha=0.3)
+    else:
+        ax4.text(0.5, 0.5, 'No in-flight data available', ha='center', va='center', 
+                transform=ax4.transAxes, fontsize=12)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_filename = f"{output_prefix}_analysis.png"
+    plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+    print(f"[PLOTTING] Saved plot to {plot_filename}")
+    plt.close()
+    
+    # Also save raw data to CSV for external analysis
+    csv_filename = f"{output_prefix}_cwnd_log.csv"
+    with open(csv_filename, 'w') as f:
+        f.write("time_sec,cwnd_mss,cwnd_bytes,phase,event\n")
+        for t, c, ph, evt in cwnd_log:
+            f.write(f"{t-transfer_start_time:.6f},{c:.2f},{c*MSS_BYTES:.0f},{ph},{evt}\n")
+    print(f"[PLOTTING] Saved cwnd data to {csv_filename}")
+    
+    if rtt_log:
+        rtt_csv = f"{output_prefix}_rtt_log.csv"
+        with open(rtt_csv, 'w') as f:
+            f.write("time_sec,rtt_ms\n")
+            for t, r in rtt_log:
+                f.write(f"{t-transfer_start_time:.6f},{r:.3f}\n")
+        print(f"[PLOTTING] Saved RTT data to {rtt_csv}")
+
+# ============================================================================
 
 def run_server(server_ip, server_port):
     """
@@ -395,6 +673,7 @@ def run_server(server_ip, server_port):
     Removed SWS parameter - now using dynamic cwnd from CUBIC.
     """
     global file_data, file_size, next_seq, base_seq, client_addr, transfer_complete, sock, cubic_cc
+    global transfer_start_time  # LOGGING ADDITION
     
     # PART 2 ADDITION: Initialize CUBIC congestion control
     cubic_cc = CubicCongestionControl()
@@ -402,18 +681,19 @@ def run_server(server_ip, server_port):
     # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((server_ip, server_port))
-    print(f"Server listening on {server_ip}:{server_port}")
+    print(f"\n[SERVER] Listening on {server_ip}:{server_port}")
     print(cubic_cc.get_state_str())
 
     # --- 1. Wait for Connection Request ---
+    print("\n[SERVER] Waiting for client connection...")
     while True:
         try:
             request, client_addr = sock.recvfrom(1)
             if request == b'\x01':
-                print(f"Connection request from {client_addr}. Starting transfer.")
+                print(f"[SERVER] Connection request received from {client_addr}")
                 break
         except Exception as e:
-            print(f"Error waiting for client: {e}")
+            print(f"[ERROR] Error waiting for client: {e}")
             return
 
     # --- 2. Read File ---
@@ -421,19 +701,26 @@ def run_server(server_ip, server_port):
         with open('data.txt', 'rb') as f:
             file_data = f.read()
         file_size = len(file_data)
-        print(f"File data.txt read ({file_size} bytes).")
+        print(f"[SERVER] File 'data.txt' loaded: {file_size} bytes ({file_size/1024:.2f} KB)")
     except FileNotFoundError:
-        print("Error: data.txt not found.")
+        print("[ERROR] File 'data.txt' not found")
         sock.close()
         return
 
     # --- 3. Start ACK Receiver Thread ---
     receiver_thread = threading.Thread(target=ack_receiver_thread, args=(sock,))
     receiver_thread.start()
+    print("[THREAD] ACK receiver thread started")
 
     # --- 4. Main Sender Loop ---
+    print("\n" + "="*80)
+    print("STARTING FILE TRANSFER")
+    print("="*80 + "\n")
+    
+    transfer_start_time = time.time()  # LOGGING ADDITION
     start_time = time.time()
     last_state_print = time.time()
+    last_progress_print = time.time()
     
     # Send initial packets to fill the window
     with state_lock:
@@ -454,7 +741,7 @@ def run_server(server_ip, server_port):
             
             for seq in packets_to_retransmit:
                 if seq in in_flight_packets:
-                    print(f"--- TIMEOUT for seq {seq} (RTO: {current_packet_rto:.2f}s) ---")
+                    print(f"\n[TIMEOUT] *** Packet timeout detected *** seq={seq}, RTO={current_packet_rto:.2f}s")
                     stats["packets_retransmitted"] += 1
                     stats["timeouts"] += 1
                     
@@ -470,15 +757,19 @@ def run_server(server_ip, server_port):
                     dup_ack_counts[seq] = 0
             
             # Periodic state logging
-            if current_time - last_state_print > 2.0:
-                print(cubic_cc.get_state_str())
+            if current_time - last_state_print > 0.5:  # LOGGING CHANGE: More frequent (was 2.0s)
+                print(f"\n{cubic_cc.get_state_str()}")
+                print(f"[PROGRESS] {base_seq}/{file_size} bytes ({base_seq/file_size*100:.1f}%) | "
+                      f"In-flight: {len(in_flight_packets)} pkts | "
+                      f"Stats: {stats['packets_sent']} sent, {stats['packets_retransmitted']} retx, "
+                      f"{stats['timeouts']} TO, {stats['fast_retransmits']} FR\n")
                 last_state_print = current_time
         
         # Sleep briefly to prevent busy-looping
         time.sleep(0.001)
 
     # --- 5. Send EOF ---
-    print("All file data acknowledged. Sending EOF.")
+    print("\n[SERVER] All data acknowledged. Sending EOF...")
     eof_packet = make_packet(file_size, EOF_MSG, int(time.time() * 1000) & 0xFFFFFFFF)
     for _ in range(5):
         sock.sendto(eof_packet, client_addr)
@@ -493,10 +784,12 @@ def run_server(server_ip, server_port):
     total_time = end_time - start_time
     throughput_mbps = (file_size * 8) / (total_time * 1_000_000) if total_time > 0 else 0
     
-    print("\n--- Transfer Complete ---")
-    print(f"Total time: {total_time:.2f} seconds")
-    print(f"Throughput: {throughput_mbps:.2f} Mbps")
-    print("Statistics:")
+    print("\n" + "="*80)
+    print("TRANSFER COMPLETE")
+    print("="*80)
+    print(f"Total time: {total_time:.3f} seconds")
+    print(f"Throughput: {throughput_mbps:.3f} Mbps")
+    print(f"\nFinal Statistics:")
     print(f"  Packets Sent: {stats['packets_sent']}")
     print(f"  Packets Retransmitted: {stats['packets_retransmitted']}")
     print(f"  Timeouts: {stats['timeouts']}")
@@ -505,9 +798,12 @@ def run_server(server_ip, server_port):
     print(f"  SACKs Processed: {stats['sacks_processed']}")
     print(f"  Bytes Acknowledged: {stats['bytes_acked']}")
     print(f"  Final RTO: {rtt_estimator.get_rto():.3f}s")
-    print(f"  Final SRTT: {rtt_estimator.srtt:.3f}s")
-    print(cubic_cc.get_state_str())
-    print("-------------------------\n")
+    print(f"  Final SRTT: {rtt_estimator.srtt*1000:.2f}ms" if rtt_estimator.srtt > 0 else "  Final SRTT: N/A")
+    print(f"\n{cubic_cc.get_state_str()}")
+    print("="*80 + "\n")
+    
+    # LOGGING ADDITION: Generate plots
+    generate_plots(output_prefix="p2_server")
 
 
 if __name__ == "__main__":
