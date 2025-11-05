@@ -233,7 +233,7 @@ class CubicCongestionControl:
             # Already at or above target, slow growth
             self.cwnd += 1.0 / self.cwnd
     
-    def on_loss_event(self, loss_type='timeout'):
+    def on_loss_event(self, loss_type='timeout',retrans_count = 0):
         """
         PART 2 ADDITION: Called when packet loss is detected.
         Implements CUBIC's multiplicative decrease.
@@ -270,7 +270,7 @@ class CubicCongestionControl:
             # LOGGING ADDITION: Record timeout event
             cwnd_log.append((time.time(), self.cwnd, "SLOW_START", "timeout"))
             
-        elif loss_type == 'fast_retransmit':
+        elif loss_type == 'fast_retransmit' and retrans_count == 0:
             # Mild congestion: multiplicative decrease
             old_cwnd = self.cwnd
             old_ssthresh = self.ssthresh
@@ -301,6 +301,10 @@ class CubicCongestionControl:
             
             # LOGGING ADDITION: Record fast retransmit event
             cwnd_log.append((time.time(), self.cwnd, "CONGESTION_AVOIDANCE", "fast_retransmit"))
+        elif loss_type == 'fast_retransmit':
+            # LOGGING ADDITION: Record fast retransmit event
+            cwnd_log.append((time.time(), self.cwnd, "CONGESTION_AVOIDANCE", "fast_retransmit"))
+
     
     def get_state_str(self):
         """Return string representation of current state for logging"""
@@ -482,7 +486,8 @@ def process_ack(ack_packet):
                     stats["packets_retransmitted"] += 1
                     
                     # PART 2 ADDITION: Notify CUBIC of loss event
-                    cubic_cc.on_loss_event('fast_retransmit')
+                    
+                    cubic_cc.on_loss_event('fast_retransmit',retrans_count)
                     
                     data_chunk = old_packet[HEADER_LEN:]
                     new_timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFF
