@@ -26,7 +26,7 @@ RTO_MULTIPLIER = 2
 CUBIC_C = 100                   # CUBIC scaling constant
 CUBIC_BETA = 0.7                 # Multiplicative decrease factor (0.7 = 30% reduction)
 INITIAL_CWND_MSS = 1             # Initial congestion window (in MSS units)
-INITIAL_SSTHRESH_MSS = 250       # Initial slow start threshold (in MSS units)
+INITIAL_SSTHRESH_MSS = 220       # Initial slow start threshold (in MSS units)
 MIN_CWND_MSS = 1                 # Minimum congestion window
 MAX_CWND_MSS = 50000               # Maximum congestion window (safety limit)
 MSS_BYTES = DATA_LEN             # Maximum Segment Size = 1180 bytes
@@ -39,7 +39,8 @@ CUBIC_TCP_FRIENDLINESS = True    # Enable TCP-friendliness mode
 
 PACKET_CAP_TIMEOUT = 3
 EXPONENTIAL_INC = 1
-TIMEOUT_CWND_MULT = 0.5
+TIMEOUT_CWND_MULT = 0.95
+FAST_RETRANSMIT_THRESHOLD = 0
 
 # ============================================================================
 
@@ -274,7 +275,7 @@ class CubicCongestionControl:
             # LOGGING ADDITION: Record timeout event
             cwnd_log.append((time.time(), self.cwnd, "SLOW_START", "timeout"))
             
-        elif loss_type == 'fast_retransmit' and retrans_count == 0:
+        elif loss_type == 'fast_retransmit' and retrans_count == FAST_RETRANSMIT_THRESHOLD:
             # Mild congestion: multiplicative decrease
             old_cwnd = self.cwnd
             old_ssthresh = self.ssthresh
