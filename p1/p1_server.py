@@ -16,7 +16,7 @@ FAST_RETRANSMIT_K = 2
 
 # --- RTO Estimator (Jacobson/Karels Algorithm) ---
 class RTOEstimator:
-    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.0, max_rto=60.0):
+    def __init__(self, alpha=0.125, beta=0.25, initial_rto=1.0, min_rto=0.04, max_rto=60.0):
         self.alpha = alpha
         self.beta = beta
         self.srtt = 0.0
@@ -37,7 +37,11 @@ class RTOEstimator:
             self.rttvar = (1 - self.beta) * self.rttvar + self.beta * delta
             self.srtt = (1 - self.alpha) * self.srtt + self.alpha * sample_rtt
         
-        self.rto = max(self.min_rto, min(self.srtt + 4 * self.rttvar, self.max_rto))
+        # TCP-style RTO with clock granularity
+        G = 0.005  # 100ms clock granularity
+        self.rto = self.srtt + max(G, 4 * self.rttvar)
+        self.rto = max(self.min_rto, min(self.rto, self.max_rto))
+        
         print("Updated RTO: {:.3f}s, SRTT: {:.3f}s, RTTVAR: {:.3f}s".format(self.rto, self.srtt, self.rttvar))
 
     def get_rto(self):
@@ -104,15 +108,13 @@ def process_ack(ack_packet):
 
     with state_lock:
         stats["acks_received"] += 1
-        # current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
-        # # --- 1. Update RTT once per ACK (timestamps make Karn’s Rule unnecessary) ---
-        # sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
-        # rtt_estimator.update(sample_rtt_ms / 1000.0)
+        
         was_base_retransmitted = False
         if base_seq in in_flight_packets:
             _packet, _send_time, retrans_count = in_flight_packets[base_seq]
             if retrans_count > 0:
                 was_base_retransmitted = True
+        
         # --- 1. Process SACKs (Karn's Rule applied here) ---
         if sack_end != 0:
             stats["sacks_processed"] += 1
@@ -131,6 +133,15 @@ def process_ack(ack_packet):
 
             for seq in sack_keys:
                 packet, send_time, retrans_count = in_flight_packets.pop(seq)
+                
+                # Karn's Rule: Only update RTT for original transmissions
+                if retrans_count == 0:
+                    current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
+                    packet_ts = struct.unpack(PACKET_FORMAT, packet[:HEADER_LEN])[1]
+                    sample_rtt_ms = (current_time_ms - packet_ts) & 0xFFFFFFFF
+                    sample_rtt = sample_rtt_ms / 1000.0
+                    print(f"Sample RTT: {sample_rtt:.3f}s")
+                    rtt_estimator.update(sample_rtt)
 
 
         # --- 2. Process Cumulative ACK (Karn's Rule applied here) ---
@@ -138,7 +149,9 @@ def process_ack(ack_packet):
             if not was_base_retransmitted:
                 current_time_ms = int(time.time() * 1000) & 0xFFFFFFFF
                 sample_rtt_ms = (current_time_ms - ts_echo) & 0xFFFFFFFF
-                rtt_estimator.update(sample_rtt_ms / 1000.0)
+                sample_rtt = sample_rtt_ms / 1000.0
+                print(f"Sample RTT: {sample_rtt:.3f}s")
+                rtt_estimator.update(sample_rtt)
             # New data has been cumulatively acknowledged
             base_seq = cum_ack
             dup_ack_counts.clear() # Reset duplicate ACK counter
