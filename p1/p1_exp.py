@@ -51,6 +51,7 @@ def run(expname):
     output_file = f'reliability_{expname}_K2.csv'
     f_out = open(output_file, 'w')
     f_out.write("iteration,loss,delay,jitter,md5_hash,ttc\n")
+    f_out.flush()
 
 
     SERVER_IP = "10.0.0.1"
@@ -120,6 +121,7 @@ def run(expname):
                     md5_hash = compute_md5(OUTFILE)
                     # write the result to a file
                     f_out.write(f"{i},{LOSS},{DELAY},{JITTER},{md5_hash},{ttc}\n")
+                    f_out.flush()
                     # Stop the network
                     net.stop()
 

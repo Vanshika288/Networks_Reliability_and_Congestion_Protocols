@@ -2,6 +2,7 @@ import socket
 import sys
 import time
 import struct
+import zlib
 
 # --- Constants ---
 MAX_PAYLOAD_SIZE = 1200
@@ -15,13 +16,14 @@ OUTFILE = 'received_data.txt'
 # --- Client State ---
 receiver_buffer = {}  # {seq: data_chunk}
 expected_seq = 0      # Next byte expected in-order
+data_buffer = bytearray()  # Will accumulate all received data
 
-# --- Statistics ---
 stats = {
     "packets_received": 0,
     "duplicates_received": 0,
     "out_of_order_packets": 0,
-    "total_bytes_written": 0
+    "total_bytes_written": 0,
+    "bytes_received": 0
 }
 
 def make_ack_packet(cum_ack, ts_echo, sack_block):
@@ -36,21 +38,6 @@ def make_ack_packet(cum_ack, ts_echo, sack_block):
         sack_start, sack_end = sack_block
         
     return struct.pack(PACKET_FORMAT, cum_ack, ts_echo, sack_start, sack_end, b'\x00'*4)
-
-# def get_sack_block():
-#     """Finds the first non-contiguous block in the buffer for SACK."""
-#     if not receiver_buffer:
-#         return None
-    
-#     # Find the first key (sequence number) in the buffer
-#     first_ooo_seq = min(receiver_buffer.keys())
-    
-#     # The SACK block covers just this one packet
-#     # A more complex implementation would merge contiguous blocks in the buffer
-#     sack_start = first_ooo_seq
-#     sack_end = first_ooo_seq + len(receiver_buffer[first_ooo_seq])
-    
-#     return (sack_start, sack_end)
 
 def get_sack_range(buffer, base_seq):
     """Return (start, end) of the largest contiguous received block above base_seq."""
@@ -72,10 +59,11 @@ def get_sack_range(buffer, base_seq):
         return 0, 0
     return sack_start, ooo_acks
 
-
-def process_data_packet(packet, f_out):
-    """Processes an incoming data packet and returns an ACK packet to send."""
-    global expected_seq
+def process_data_packet(packet):
+    """
+    Processes an incoming data packet and returns an ACK packet to send.
+    """
+    global expected_seq, data_buffer
     
     try:
         # Unpack Data: Seq (I), TS (I), SACK_Start (I), SACK_End (I)
@@ -101,15 +89,15 @@ def process_data_packet(packet, f_out):
     
     elif seq == expected_seq:
         # In-order packet
-        f_out.write(data)
-        stats["total_bytes_written"] += data_len
+        data_buffer.extend(data)
+        stats["bytes_received"] += data_len
         expected_seq += data_len
         
         # Check buffer for contiguous packets
         while expected_seq in receiver_buffer:
             buffered_data = receiver_buffer.pop(expected_seq)
-            f_out.write(buffered_data)
-            stats["total_bytes_written"] += len(buffered_data)
+            data_buffer.extend(buffered_data)
+            stats["bytes_received"] += len(buffered_data)
             expected_seq += len(buffered_data)
             
     elif seq > expected_seq:
@@ -126,7 +114,7 @@ def process_data_packet(packet, f_out):
 
 def run_client(server_ip, server_port):
     """Main client logic."""
-    global expected_seq
+    global expected_seq, data_buffer
     
     # Create UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -154,27 +142,24 @@ def run_client(server_ip, server_port):
         sock.close()
         return
 
-    # --- 2. Main Receiver Loop ---
     start_time = time.time()
     try:
-        with open(OUTFILE, 'wb') as f_out:
-            # Process the first packet we already received
-            ack_to_send = process_data_packet(first_packet, f_out)
-            if ack_to_send:
-                sock.sendto(ack_to_send, server_addr)
+        ack_to_send = process_data_packet(first_packet)
+        if ack_to_send and ack_to_send != "EOF":
+            sock.sendto(ack_to_send, server_addr)
 
-            # Loop for subsequent packets
-            while True:
-                # Set a longer timeout for the transfer
-                sock.settimeout(10.0) 
-                
-                packet, _ = sock.recvfrom(MAX_PAYLOAD_SIZE)
-                ack_to_send = process_data_packet(packet, f_out)
-                
-                if ack_to_send == "EOF":
-                    break # Transfer complete
-                elif ack_to_send:
-                    sock.sendto(ack_to_send, server_addr)
+        # Loop for subsequent packets
+        while True:
+            # Set a longer timeout for the transfer
+            sock.settimeout(10.0) 
+            
+            packet, _ = sock.recvfrom(MAX_PAYLOAD_SIZE)
+            ack_to_send = process_data_packet(packet)
+            
+            if ack_to_send == "EOF":
+                break # Transfer complete
+            elif ack_to_send:
+                sock.sendto(ack_to_send, server_addr)
 
     except socket.timeout:
         print("Transfer stalled. Server stopped responding.")
@@ -185,19 +170,34 @@ def run_client(server_ip, server_port):
 
     end_time = time.time()
     total_time = end_time - start_time
+
+    received_bytes = len(data_buffer)
+    
+    if len(data_buffer) < 4:
+        raise Exception("Received data too small to contain header")
+    
+    recieved_size = struct.unpack('!I', data_buffer[:4])[0]
+    recieved_data = bytes(data_buffer[4:4+recieved_size])
+    
+    final_data = zlib.decompress(recieved_data)
+    derecieved_size = len(final_data)
+    
+    with open(OUTFILE, 'wb') as f_out:
+        f_out.write(final_data)
+    
+    stats["total_bytes_written"] = derecieved_size
+        
+    # Calculate throughputs
     throughput_mbps = (stats["total_bytes_written"] * 8) / (total_time * 1_000_000) if total_time > 0 else 0
+    network_throughput_mbps = (stats["bytes_received"] * 8) / (total_time * 1_000_000) if total_time > 0 else 0
 
     print("\n--- File Reception Complete ---")
     print(f"Saved to {OUTFILE}")
     print(f"Total time: {total_time:.2f} seconds")
     print("Statistics:")
-    print(f"  Total Bytes Written: {stats['total_bytes_written']}")
     print(f"  Packets Received: {stats['packets_received']}")
     print(f"  Out-of-Order Packets: {stats['out_of_order_packets']}")
     print(f"  Duplicate Packets: {stats['duplicates_received']}")
-    print(f"  Throughput: {throughput_mbps:.2f} Mbps")
-    print("-------------------------------\n")
-
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:

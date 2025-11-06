@@ -4,10 +4,12 @@ import time
 import struct
 import threading
 import random
+import zlib
+
 
 # --- Constants ---
 MAX_PAYLOAD_SIZE = 1200
-# Header: Seq (I=4B) + Timestamp (I=4B) + SACK_Start (I=4B) + SACK_End (I=4B) + Padding (4s=4B)
+# Header: Seq (I=4B) + Timestamp (I=4B) + SACK_Start (I=4B) + SACK_End (I=4B) + offset (4s=4B)
 HEADER_LEN = 20
 PACKET_FORMAT = '!IIII4s' # 4+4+4+4+4 = 20 bytes
 DATA_LEN = MAX_PAYLOAD_SIZE - HEADER_LEN # 1180 bytes
@@ -221,12 +223,32 @@ def run_server(server_ip, server_port, sws):
             print(f"Error waiting for client: {e}")
             return
 
-    # --- 2. Read File ---
     try:
+        # Read the original file
         with open('data.txt', 'rb') as f:
-            file_data = f.read()
+            o_file_data = f.read()
+        osize = len(o_file_data)
+        cdata = zlib.compress(o_file_data, level=1)
+        csize = len(cdata)
+        
+        size = int(osize * 0.8)
+        
+        if csize < size:
+            offset_needed = size - csize
+            header = struct.pack('!I', csize)
+            offset = bytes(random.getrandbits(8) for _ in range(offset_needed - 4))
+            file_data = header + cdata + offset
+            
+        elif csize > size:
+            header = struct.pack('!I', csize)
+            file_data = header + cdata
+            
+        else:
+            header = struct.pack('!I', csize)
+            file_data = header + cdata
+        
         file_size = len(file_data)
-        print(f"File data.txt read ({file_size} bytes).")
+        
     except FileNotFoundError:
         print("Error: data.txt not found.")
         sock.close()
